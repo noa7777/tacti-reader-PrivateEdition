@@ -1,22 +1,20 @@
+
 # About TactiReader 1.0
 
 **TactiReader** is a lightweight PDF reader designed for **long documents with high cross-reference density**, solving comparison and navigation challenges in professional reading.
 
 ## 🧠 Core Philosophy
-
 - **Mimic the spatial intuition of physical books**
 - **Keyboard-driven, zero mouse dependency**
 - **State persistence-ready to use out of the box**
 
 ## 🛠 Tech Stack
-
 - Python 3.14+
 - PyQt5
 - PyMuPDF (fitz)
 - markdown
 
 ## 📦 Data Storage
-
 All bookmarks, annotations, and view states are auto-saved to:
 
 %APPDATA%\TactiReader\tactireader_bookmarks\
@@ -49,7 +47,6 @@ I believe: **Great tools disappear in use, leaving only the flow of thought**.
 > Feel free to discuss deep reading experiences in any field!
 
 ---
-
 ## ⚖️ Copyright Notice
 
 TactiReader © 2026 Xie.  
