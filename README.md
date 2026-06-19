@@ -1,8 +1,8 @@
-源项目地址：https://github.com/p3psi-boo/tacti-reader
-新增，ctrl+L展开目录》全新的交互模式
-标注字体可调
-新增，颜色模式，凑会吧
-把tab栏交互给改了，放到了菜单栏。
+- 源项目地址：https://github.com/p3psi-boo/tacti-reader
+- 新增，ctrl+L展开目录》全新的交互模式
+- 标注字体可调
+- 新增，颜色模式，凑会吧
+- 把tab栏交互给改了，放到了菜单栏。
 
 
 
