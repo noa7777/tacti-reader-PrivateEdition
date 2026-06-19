@@ -45,6 +45,7 @@ from PyQt5.QtWidgets import (
     QTreeWidgetItem,
     QTabBar,
     QMenu,
+    QShortcut,
 )
 from PyQt5.QtCore import (
     Qt,
@@ -77,6 +78,7 @@ from PyQt5.QtGui import (
     QFontMetrics,
     QTransform,
     QKeyEvent,
+    QKeySequence,
 )
 
 from tacti_reader.constants import (
@@ -89,6 +91,141 @@ from tacti_reader.constants import (
 )
 from tacti_reader.config import ConfigManager
 from tacti_reader.utils import get_config_path, resource_path, serialize_annotations
+
+
+# ==================== 主题系统 ====================
+
+def _hex_to_rgb(hex_color):
+    """将 #RRGGBB 转为 (R, G, B) 元组。"""
+    hex_color = hex_color.lstrip("#")
+    return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def _rgb_to_hex(rgb_tuple):
+    """将 (R, G, B) 转回 #RRGGBB 字符串。"""
+    return "#{:02x}{:02x}{:02x}".format(
+        max(0, min(255, int(round(rgb_tuple[0])))),
+        max(0, min(255, int(round(rgb_tuple[1])))),
+        max(0, min(255, int(round(rgb_tuple[2])))),
+    )
+
+
+def transform_color(hex_color, W_hex, B_hex):
+    """
+    根据主题白色 W 和黑色 B，对基础颜色 hex_color 做逐通道线性映射。
+    V_out = B_channel + (W_channel - B_channel) * (V_in / 255)
+    """
+    rgb_in = _hex_to_rgb(hex_color)
+    W = _hex_to_rgb(W_hex)
+    B = _hex_to_rgb(B_hex)
+    out = []
+    for v_in, w, b in zip(rgb_in, W, B):
+        v_out = b + (w - b) * (v_in / 255.0)
+        v_out = round(v_out)
+        v_out = max(0, min(255, v_out))
+        out.append(v_out)
+    return _rgb_to_hex(tuple(out))
+
+
+def _map_channel(v_in, b, w):
+    """单通道线性映射。"""
+    return max(0, min(255, round(b + (w - b) * (v_in / 255.0))))
+
+
+def transform_pixmap(pixmap, W_hex, B_hex, white_threshold=200):
+    """
+    对 QPixmap 中接近白色的像素逐通道应用主题映射。
+    使用 Pillow 的 C 级查表/合成操作，避免 Python 逐像素循环。
+    """
+    if pixmap.isNull() or not W_hex or not B_hex:
+        return pixmap
+
+    try:
+        from io import BytesIO
+        from PIL import Image, ImageChops
+        from PyQt5.QtCore import QBuffer
+
+        # QPixmap -> BMP bytes -> PIL Image（避免直接操作 QImage 内存，BMP 比 PNG 快）
+        buffer = QBuffer()
+        buffer.open(QBuffer.ReadWrite)
+        pixmap.save(buffer, "BMP")
+        bmp_data = bytes(buffer.data().data())
+        buffer.close()
+
+        pil_img = Image.open(BytesIO(bmp_data)).convert('RGB')
+
+        W = _hex_to_rgb(W_hex)
+        B = _hex_to_rgb(B_hex)
+
+        # 查找表
+        lut_r = [_map_channel(i, B[0], W[0]) for i in range(256)]
+        lut_g = [_map_channel(i, B[1], W[1]) for i in range(256)]
+        lut_b = [_map_channel(i, B[2], W[2]) for i in range(256)]
+
+        # 分离通道
+        r, g, b = pil_img.split()
+
+        # 构建白色背景 mask：RGB 均 >= white_threshold 的像素
+        def _mask_band(band):
+            return band.point(lambda v: 255 if v >= white_threshold else 0, '1')
+
+        mask = ImageChops.logical_and(_mask_band(r), _mask_band(g))
+        mask = ImageChops.logical_and(mask, _mask_band(b))
+
+        # 应用查找表
+        r_mapped = r.point(lut_r)
+        g_mapped = g.point(lut_g)
+        b_mapped = b.point(lut_b)
+
+        # 只在 mask 区域使用映射后的通道，其余保持原样
+        r_result = Image.composite(r_mapped, r, mask)
+        g_result = Image.composite(g_mapped, g, mask)
+        b_result = Image.composite(b_mapped, b, mask)
+
+        result = Image.merge('RGB', (r_result, g_result, b_result))
+
+        # PIL Image -> PNG bytes -> QPixmap
+        output = BytesIO()
+        result.save(output, format='PNG')
+        output.seek(0)
+        new_pixmap = QPixmap()
+        new_pixmap.loadFromData(output.getvalue())
+        return new_pixmap
+    except Exception as e:
+        import traceback
+        print(f"transform_pixmap error: {e}\n{traceback.format_exc()}")
+        return pixmap
+
+
+THEMES = {
+    'light': ('#FFFFFF', '#141414'),
+    'yellow': ('#F5EFD7', '#141412'),
+    'green': ('#C7EDCC', '#101310'),
+    'heguang': ('#E0E0E0', '#141414'),
+}
+
+# 基础调色板
+THEME_PALETTE = {
+    'bg': '#F5F5F5',
+    'fg': '#1A1A1A',
+    'button_bg': '#4A90D9',
+    'button_fg': '#FFFFFF',
+    'entry_bg': '#FFFFFF',
+    'entry_fg': '#1A1A1A',
+    'label_bg': '#F5F5F5',
+    'label_fg': '#1A1A1A',
+    'border': '#D9D9D9',
+    'menu_bg': '#F5F5F5',
+    'menu_fg': '#1A1A1A',
+    'highlight': '#4A90D9',
+}
+
+THEME_NAMES = {
+    'light': '浅色',
+    'yellow': '黄色',
+    'green': '绿色',
+    'heguang': '和光',
+}
 
 
 class BookmarkButton(QLabel):
@@ -165,8 +302,7 @@ class InlineTextEdit(QTextEdit):
             super().keyPressEvent(event)
 
     def focusOutEvent(self, event):
-        # 失去焦点时也确认
-        self.textConfirmed.emit(self.toPlainText())
+        # 不自动确认/取消，由父窗格主动管理
         super().focusOutEvent(event)
 
 
@@ -521,7 +657,7 @@ class TocDialog(QDialog):
 
     nodeSelected = pyqtSignal(int)  # page number
 
-    def __init__(self, pdf_toc, parent=None):
+    def __init__(self, pdf_toc, parent=None, theme_name='light', colors=None):
         super().__init__(parent)
         self.raw_toc = pdf_toc
         self.tree_root = []
@@ -529,6 +665,12 @@ class TocDialog(QDialog):
         self.maxVisibleDepth = 1
         self.selectedId = ""
         self.expanded_branch = []  # track which branch is expanded (list of node_ids)
+        self.theme_name = theme_name
+        if colors is None:
+            W_hex, B_hex = THEMES.get(theme_name, THEMES['light'])
+            self.colors = {key: transform_color(value, W_hex, B_hex) for key, value in THEME_PALETTE.items()}
+        else:
+            self.colors = colors
 
         self.setWindowTitle("PDF 目录导航")
         # 窗口大小：占屏幕的 3/5，并居中
@@ -551,6 +693,7 @@ class TocDialog(QDialog):
         self._render()
 
     def _setup_ui(self):
+        self.setStyleSheet(f"QDialog {{ background-color: {self.colors['bg']}; }}")
         main_layout = QVBoxLayout(self)
 
         self.scroll_area = QScrollArea()
@@ -673,7 +816,13 @@ class TocDialog(QDialog):
         """Create a bordered container with label and buttons for one depth level."""
         container = QFrame()
         container.setFrameShape(QFrame.StyledPanel)
-        container.setStyleSheet("QFrame { border: 1px solid #ddd; border-radius: 4px; }")
+        container.setStyleSheet(f"""
+            QFrame {{
+                background-color: {self.colors['bg']};
+                border: 1px solid {self.colors['border']};
+                border-radius: 4px;
+            }}
+        """)
 
         layout = QVBoxLayout(container)
         layout.setContentsMargins(6, 4, 6, 4)
@@ -681,7 +830,7 @@ class TocDialog(QDialog):
 
         # Label
         label = QLabel(f"第{depth}层")
-        label.setStyleSheet("color: gray; font-size: 11px;")
+        label.setStyleSheet(f"color: {self.colors['fg']}; font-size: 11px;")
         layout.addWidget(label)
 
         # Buttons wrapper with flow layout
@@ -705,23 +854,24 @@ class TocDialog(QDialog):
         is_selected = (node.node_id in highlighted_ids)
 
         if is_selected:
-            btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #4A90D9;
-                    color: white;
-                    border: 1px solid #357ABD;
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {self.colors['highlight']};
+                    color: {self.colors['button_fg']};
+                    border: 1px solid {self.colors['highlight']};
                     border-radius: 3px;
                     padding: 6px 10px;
                     font-size: 12pt;
-                }
-                QPushButton:hover {
-                    background-color: #5BA0E9;
-                }
+                }}
+                QPushButton:hover {{
+                    background-color: {self.colors['button_bg']};
+                }}
             """)
         else:
             btn.setStyleSheet("""
                 QPushButton {
                     background-color: #F0F0F0;
+                    color: #000000;
                     border: 1px solid #CCC;
                     border-radius: 3px;
                     padding: 6px 10px;
@@ -819,8 +969,13 @@ class TacticalPane(QLabel):
         self.text_color = QColor(0, 0, 0)  # 黑色 - 文本
         self.pen_width = 3
         self.rect_border_width = 2
-        self.font_size = 12
-
+        # 文字批注字体大小（pt），优先从主窗口同步
+        main_window = self.window()
+        if main_window is not None and type(main_window).__name__ == 'TactiReader' and hasattr(main_window, 'text_annotation_font_size'):
+            self.font_size = main_window.text_annotation_font_size
+        else:
+            self.font_size = 19
+        
         # 文本编辑相关
         self.editing_text_annotation = None
         self.text_edit_start_pos = QPointF()
@@ -1115,7 +1270,7 @@ class TacticalPane(QLabel):
             painter.drawPath(scaled_path)
             painter.restore()
 
-        # 3. 文本批注的预览由 InlineTextEdit 自身处理，无需在此绘制
+        # 3. 文本批注的预览由内联编辑器自身处理，无需在此绘制
         # === 修复结束 ===
         # === 极简方案：直接问主窗口我是不是当前阅读区域 ===
         main_window = self.window()
@@ -1281,7 +1436,8 @@ class TacticalPane(QLabel):
             )
 
             painter.save()
-            font = QFont("Arial", int(font_size * self.scale_factor))
+            font = QFont("Arial")
+            font.setPixelSize(int(font_size * self.scale_factor))
             painter.setFont(font)
             painter.setPen(QPen(color))
             painter.drawText(text_rect_screen, Qt.TextWordWrap, text)
@@ -1331,26 +1487,26 @@ class TacticalPane(QLabel):
                 self.pen_points = [(img_x, img_y)]  # 修复：初始化路径起点
                 self.pen_path.moveTo(event.pos())
             elif self.annotation_mode == "text":
-                # === 关键修复：如果已有文本输入框，先删除它 ===
+                # 如果已有输入框，先完成它
                 if self.text_input_widget:
-                    self.text_input_widget.deleteLater()
-                    self.text_input_widget = None
-                    self.editing_text_annotation = None
-                    self.temp_annotation = None
-                # =============================================
-                # 对于文本，直接创建文本框
+                    self.finish_text_annotation(self.text_input_widget.toPlainText())
+                # 对于文本，创建覆盖页面剩余宽度的内联编辑器
                 screen_x = event.pos().x()
                 screen_y = event.pos().y()
+                # 计算页面右边界（屏幕坐标）
+                page_right = self.offset.x() + self.original_pixmap.width() * self.scale_factor
+                edit_width = max(50, int(page_right - screen_x))
+                edit_height = int(self.font_size * self.scale_factor * 2) + 10
                 # 创建文本编辑部件
                 self.text_input_widget = InlineTextEdit(self)
                 self.text_input_widget.setGeometry(
-                    int(screen_x), int(screen_y), 200, 100
+                    int(screen_x), int(screen_y), edit_width, edit_height
                 )
                 self.text_input_widget.setStyleSheet(f"""
                 QTextEdit {{
                     background-color: rgba(255, 255, 255, 200);
                     border: 1px solid {self.text_color.name()};
-                    font-size: {self.font_size}px;
+                    font-size: {int(self.font_size * self.scale_factor)}px;
                     color: {self.text_color.name()};
                 }}
                 """)
@@ -1365,15 +1521,13 @@ class TacticalPane(QLabel):
                 self.text_input_widget.editingCancelled.connect(
                     self.cancel_text_annotation
                 )
+                self.text_input_widget.textChanged.connect(
+                    self._on_text_input_changed
+                )
                 # 创建临时批注
                 self.temp_annotation = {
                     "type": "text",
-                    "rect": [
-                        img_x,
-                        img_y,
-                        200 / self.scale_factor,
-                        100 / self.scale_factor,
-                    ],
+                    "rect": [img_x, img_y, edit_width / self.scale_factor, edit_height / self.scale_factor],
                     "color": self.text_color.name(),
                     "text": "",
                     "font_size": self.font_size,
@@ -1536,13 +1690,22 @@ class TacticalPane(QLabel):
         menu.addAction(copy_action)
         menu.exec_(event.globalPos())
 
+    def _on_text_input_changed(self):
+        """根据内容动态调整文本输入框高度。"""
+        if not self.text_input_widget:
+            return
+        doc = self.text_input_widget.document()
+        doc.setTextWidth(self.text_input_widget.viewport().width())
+        new_height = int(doc.size().height()) + 10
+        self.text_input_widget.setFixedHeight(max(new_height, int(self.font_size * self.scale_factor) + 10))
+
     def finish_text_annotation(self, text):
         if self.text_input_widget and self.temp_annotation:
             if text.strip():
                 self.temp_annotation["text"] = text
 
                 # === 关键修复：在 PDF 坐标系下计算文本尺寸 ===
-                pdf_font_size = self.font_size  # 字体大小（pt），直接用于 PDF 坐标
+                pdf_font_size = int(self.font_size)  # 字体大小（pt），直接用于 PDF 坐标
                 font = QFont("Arial", pdf_font_size)
                 font_metrics = QFontMetrics(font)
 
@@ -1577,11 +1740,11 @@ class TacticalPane(QLabel):
                 self.annotations.append(saved_annotation)
                 if hasattr(self.window(), "save_annotation"):
                     self.window().save_annotation(self.page_num, saved_annotation)
-                self.text_input_widget.deleteLater()
-                self.text_input_widget = None
-                self.temp_annotation = None
-                self.editing_text_annotation = None
-                self.update()
+            self.text_input_widget.deleteLater()
+            self.text_input_widget = None
+            self.temp_annotation = None
+            self.editing_text_annotation = None
+            self.update()
 
     def cancel_text_annotation(self):
         """取消文本批注"""
@@ -1882,8 +2045,7 @@ class TactiReader(QMainWindow):
         font.setFamily("Microsoft YaHei, Consolas, Courier New, monospace")
         font.setPointSize(9)
         self.setFont(font)
-        # 主窗口背景设为浅灰
-        self.setStyleSheet("QMainWindow { background-color: #f8f8f8; }")
+        # 主题系统会先设置背景，这里不再硬编码
         # === 国际化支持 ===
         # 1. 首先加载全局语言设置
         self.current_lang = "en"  # 默认语言
@@ -1986,6 +2148,9 @@ class TactiReader(QMainWindow):
                 "Text Mode (V)": "文本模式 (V)",
                 "Finish or Exit Current Annotation (Esc)": "完成或退出当前批注 (Esc)",
                 "Confirm Text Annotation (Ctrl+Enter)": "确认文字批注 (Ctrl+Enter)",
+                "Set Text Font Size...": "设置文字大小...",
+                "Text font size (pt):": "文字大小（磅）：",
+                "Invalid font size.": "字体大小无效。",
                 "Pen Color": "画笔颜色",
                 "Highlight Color": "高亮颜色",
                 "Text Color": "文字颜色",
@@ -2097,6 +2262,9 @@ class TactiReader(QMainWindow):
         if lang_from_global_config in self.translations:
             self.current_lang = lang_from_global_config
 
+        # 读取保存的主题设置
+        self.current_theme = global_config.get("theme", "light")
+
         # === NEW CODE START ===
         # 初始化最近文件列表
         self.recent_files = [
@@ -2120,6 +2288,7 @@ class TactiReader(QMainWindow):
         self.doc = None
         self.total_pages = 0
         self.last_focused_pane = "right"  # 可选值: 'left' 或 'right'
+        self._theme_page_cache = {}  # 主题页面缓存：(page_num, theme) -> QPixmap
         # Auto-show help on first run (if no bookmarks/config exist)
         if not os.listdir(CONFIG_DIR) and not (pdf_path or self.recent_files):
             # 弹出独立的语言选择对话框
@@ -2209,6 +2378,7 @@ class TactiReader(QMainWindow):
         self.bookmarks = {}
         self.pdf_toc = []  # 存储 [(level, title, page), ...]
         self.toc_state = (1, "")  # (maxVisibleDepth, selectedId)
+        self.text_annotation_font_size = 19  # 文字批注字体大小（pt）
         self.flip_multiplier = 1
         self.config_file = None
         self.left_locked = False
@@ -2381,6 +2551,18 @@ class TactiReader(QMainWindow):
         )
         view_menu.addAction(clear_all_rotations_action)
 
+        view_menu.addSeparator()
+
+        # 主题切换子菜单
+        theme_menu = view_menu.addMenu(self.tr("Theme"))
+        self._theme_actions = {}
+        for name in THEMES:
+            act = QAction(THEME_NAMES.get(name, name.capitalize()), self)
+            act.setCheckable(True)
+            act.triggered.connect(lambda checked, n=name: self.apply_theme(n))
+            theme_menu.addAction(act)
+            self._theme_actions[name] = act
+
         # --- 导航 (Navigation) ---
         nav_menu = menubar.addMenu(self.tr("Navigation"))
         # 跳转到页码... (G)
@@ -2413,8 +2595,9 @@ class TactiReader(QMainWindow):
         search_action.triggered.connect(lambda: self._trigger_shortcut(Qt.Key_F))
         nav_menu.addAction(search_action)
 
-        # PDF 目录导航...
-        toc_action = QAction(self.tr("PDF Table of Contents..."), self)
+        # PDF 目录导航... (Ctrl+L)
+        toc_action = QAction(self.tr("PDF Table of Contents... (Ctrl+L)"), self)
+        toc_action.setShortcut(QKeySequence("Ctrl+L"))
         toc_action.triggered.connect(self.open_toc_dialog)
         nav_menu.addAction(toc_action)
 
@@ -2536,13 +2719,19 @@ class TactiReader(QMainWindow):
             lambda: self._trigger_shortcut(Qt.Key_Return, Qt.ControlModifier)
         )
         annot_menu.addAction(confirm_text_action)
+        # 设置文字批注字体大小
+        set_font_size_action = QAction(self.tr("Set Text Font Size..."), self)
+        set_font_size_action.triggered.connect(self.set_text_annotation_font_size)
+        annot_menu.addAction(set_font_size_action)
 
         annot_menu.addSeparator()
 
         # 颜色选择 (复用你原有的逻辑)
+        self._pen_color_actions = []
         pen_color_menu = annot_menu.addMenu(self.tr("Pen Color"))
         for i, color in enumerate(self.pen_colors):
             color_action = QAction(self.tr(f"Pen Color {i + 1}"), self)
+            color_action.setCheckable(True)
             color_action.triggered.connect(
                 lambda checked, idx=i: self.set_pen_color_index(idx)
             )
@@ -2550,10 +2739,13 @@ class TactiReader(QMainWindow):
             pixmap.fill(color)
             color_action.setIcon(QIcon(pixmap))
             pen_color_menu.addAction(color_action)
+            self._pen_color_actions.append(color_action)
 
+        self._rect_color_actions = []
         rect_color_menu = annot_menu.addMenu(self.tr("Highlight Color"))
         for i, color in enumerate(self.rect_colors):
             color_action = QAction(self.tr(f"Highlight Color {i + 1}"), self)
+            color_action.setCheckable(True)
             color_action.triggered.connect(
                 lambda checked, idx=i: self.set_rect_color_index(idx)
             )
@@ -2561,10 +2753,13 @@ class TactiReader(QMainWindow):
             pixmap.fill(color)
             color_action.setIcon(QIcon(pixmap))
             rect_color_menu.addAction(color_action)
+            self._rect_color_actions.append(color_action)
 
+        self._text_color_actions = []
         text_color_menu = annot_menu.addMenu(self.tr("Text Color"))
         for i, color in enumerate(self.text_colors):
             color_action = QAction(self.tr(f"Text Color {i + 1}"), self)
+            color_action.setCheckable(True)
             color_action.triggered.connect(
                 lambda checked, idx=i: self.set_text_color_index(idx)
             )
@@ -2572,6 +2767,10 @@ class TactiReader(QMainWindow):
             pixmap.fill(color)
             color_action.setIcon(QIcon(pixmap))
             text_color_menu.addAction(color_action)
+            self._text_color_actions.append(color_action)
+
+        # 设置初始勾选状态
+        self._update_color_menu_checks()
 
         annot_menu.addSeparator()
 
@@ -2666,6 +2865,14 @@ class TactiReader(QMainWindow):
         }
     """)
         self.update_color_display()
+
+        # 应用保存的主题
+        self.apply_theme(self.current_theme)
+
+        # 注册全局快捷键：Ctrl+L 打开文档目录（不依赖菜单栏可见性）
+        self._toc_shortcut = QShortcut(
+            QKeySequence("Ctrl+L"), self, self.open_toc_dialog
+        )
 
         # 搜索对话框
         self.search_dialog = None
@@ -2807,7 +3014,13 @@ class TactiReader(QMainWindow):
         if not self.pdf_toc:
             return
         try:
-            dialog = TocDialog(self.pdf_toc, parent=self)
+            colors = getattr(self, '_theme_colors', None)
+            dialog = TocDialog(
+                self.pdf_toc,
+                parent=self,
+                theme_name=getattr(self, 'current_theme', 'light'),
+                colors=colors,
+            )
             dialog.nodeSelected.connect(self.jump_to_page)
             if dialog.exec_() == QDialog.Accepted:
                 # Save state
@@ -2816,6 +3029,32 @@ class TactiReader(QMainWindow):
         except Exception as e:
             import traceback
             QMessageBox.critical(self, "错误", f"打开目录失败:\n{traceback.format_exc()}")
+
+    def set_text_annotation_font_size(self):
+        """设置文字批注的字体大小（pt）"""
+        current_size = getattr(self, 'text_annotation_font_size', 12)
+        size_str, ok = QInputDialog.getText(
+            self,
+            self.tr("Set Text Font Size..."),
+            self.tr("Text font size (pt):"),
+            text=str(current_size),
+        )
+        if not ok:
+            return
+        try:
+            new_size = float(size_str)
+            if new_size <= 0 or new_size > 200:
+                raise ValueError("out of range")
+        except ValueError:
+            QMessageBox.warning(self, self.tr("Error"), self.tr("Invalid font size."))
+            return
+
+        self.text_annotation_font_size = new_size
+        # 同步更新左右窗格
+        if hasattr(self, 'left_pane'):
+            self.left_pane.font_size = new_size
+        if hasattr(self, 'right_pane'):
+            self.right_pane.font_size = new_size
 
     def _on_reading_pane_focused(self, is_left):
         """
@@ -2965,6 +3204,140 @@ class TactiReader(QMainWindow):
                 self.tr("Language Changed"),
                 self.tr("Please restart TactiReader to apply the new language."),
             )
+
+    def apply_theme(self, theme_name):
+        """应用颜色主题到整个应用界面"""
+        if theme_name not in THEMES:
+            theme_name = 'light'
+
+        self.current_theme = theme_name
+        W_hex, B_hex = THEMES[theme_name]
+        colors = {key: transform_color(value, W_hex, B_hex) for key, value in THEME_PALETTE.items()}
+
+        # 1. 主窗口背景
+        self.setStyleSheet(f"QMainWindow {{ background-color: {colors['bg']}; }}")
+
+        # 2. 菜单栏样式
+        self.menuBar().setStyleSheet(f"""
+            QMenuBar {{
+                background-color: {colors['menu_bg']};
+                color: {colors['menu_fg']};
+                border-bottom: 1px solid {colors['border']};
+                font-family: "Microsoft YaHei", "Consolas", sans-serif;
+                font-size: 10pt;
+                font-weight: 450;
+            }}
+            QMenuBar::item:selected {{
+                background-color: {colors['highlight']};
+                color: {colors['button_fg']};
+            }}
+            QMenuBar::item:pressed {{
+                background-color: {colors['highlight']};
+                color: {colors['button_fg']};
+            }}
+            QMenu {{
+                background-color: {colors['menu_bg']};
+                color: {colors['menu_fg']};
+                border: 1px solid {colors['border']};
+            }}
+            QMenu::item:selected {{
+                background-color: {colors['highlight']};
+                color: {colors['button_fg']};
+            }}
+            QMenu::separator {{
+                background-color: {colors['border']};
+                height: 1px;
+                margin: 4px 0px;
+            }}
+        """)
+
+        # 3. 通用控件样式表
+        self._theme_colors = colors
+        style = f"""
+            QWidget {{
+                background-color: {colors['bg']};
+                color: {colors['fg']};
+            }}
+            QPushButton {{
+                background-color: {colors['button_bg']};
+                color: {colors['button_fg']};
+                border: 1px solid {colors['border']};
+                border-radius: 3px;
+                padding: 4px 10px;
+            }}
+            QPushButton:hover {{
+                background-color: {colors['highlight']};
+            }}
+            QLineEdit, QTextEdit, QComboBox {{
+                background-color: {colors['entry_bg']};
+                color: {colors['entry_fg']};
+                border: 1px solid {colors['border']};
+            }}
+            QLabel {{
+                background-color: {colors['label_bg']};
+                color: {colors['label_fg']};
+            }}
+            QFrame {{
+                background-color: {colors['bg']};
+                border: 1px solid {colors['border']};
+            }}
+            QScrollArea {{
+                background-color: {colors['bg']};
+                border: none;
+            }}
+            QSplitter::handle {{
+                background-color: {colors['border']};
+            }}
+            QListWidget {{
+                background-color: {colors['entry_bg']};
+                color: {colors['entry_fg']};
+                border: 1px solid {colors['border']};
+            }}
+            QToolBar {{
+                background-color: {colors['bg']};
+                border: 1px solid {colors['border']};
+            }}
+            TacticalPane {{
+                background-color: {colors['bg']};
+                color: {colors['fg']};
+                border: 1px solid {colors['border']};
+            }}
+        """
+        self.setStyleSheet(style)
+
+        # 4. 更新菜单勾选状态
+        for name, act in self._theme_actions.items():
+            act.setChecked(name == theme_name)
+
+        # 5. 更新状态栏样式
+        self.statusBar().setStyleSheet(f"""
+            QStatusBar {{
+                background-color: {colors['bg']};
+                color: {colors['fg']};
+                border-top: 1px solid {colors['border']};
+                font-weight: 480;
+            }}
+        """)
+        self.color_status_label.setStyleSheet(f"font-weight: 500; color: {colors['fg']};")
+
+        # 6. 刷新阅读窗格（让背景色立即生效）
+        if hasattr(self, 'left_pane'):
+            self.left_pane.update()
+        if hasattr(self, 'right_pane'):
+            self.right_pane.update()
+
+        # 7. 清空页面缓存并重新渲染当前页面以应用新的主题色
+        self._theme_page_cache.clear()
+        if getattr(self, 'doc', None):
+            self.render_facing()
+
+        # 8. 保存主题配置
+        try:
+            global_config = self.config_manager.load_global_config()
+            global_config["theme"] = theme_name
+            self.config_manager.save_global_config(global_config)
+        except Exception as e:
+            print(f"Failed to save theme config: {e}")
 
     def update_ui_text(self):
         # 更新窗口标题
@@ -3488,6 +3861,12 @@ class TactiReader(QMainWindow):
     def render_page(self, page_num):
         if page_num < 0 or page_num >= self.total_pages:
             return QPixmap()
+
+        # 缓存键：页码 + 主题
+        cache_key = (page_num, getattr(self, 'current_theme', 'light'))
+        if cache_key in self._theme_page_cache:
+            return self._theme_page_cache[cache_key]
+
         try:
             page = self.doc[page_num]
             mat = fitz.Matrix(2.0, 2.0)
@@ -3495,7 +3874,19 @@ class TactiReader(QMainWindow):
             stride = pix.stride if pix.stride is not None else pix.width * 3
             img_format = QImage.Format_RGBA8888 if pix.alpha else QImage.Format_RGB888
             qt_img = QImage(pix.samples, pix.width, pix.height, stride, img_format)
-            return QPixmap.fromImage(qt_img)
+            pixmap = QPixmap.fromImage(qt_img)
+
+            # 非浅色主题下，对页面像素应用主题映射
+            if getattr(self, 'current_theme', 'light') != 'light':
+                W_hex, B_hex = THEMES[self.current_theme]
+                pixmap = transform_pixmap(pixmap, W_hex, B_hex)
+
+            # 限制缓存大小，避免内存无限增长
+            if len(self._theme_page_cache) >= 20:
+                self._theme_page_cache.pop(next(iter(self._theme_page_cache)))
+            self._theme_page_cache[cache_key] = pixmap
+
+            return pixmap
         except Exception as e:
             print(f"Render error: {e}")
             return QPixmap()
@@ -3651,6 +4042,18 @@ class TactiReader(QMainWindow):
             f" Pen:{pen_html}  Highlight:{rect_html}  Text:{text_html}"
         )
 
+    def _update_color_menu_checks(self):
+        """更新颜色菜单的勾选状态。"""
+        if hasattr(self, '_pen_color_actions'):
+            for i, action in enumerate(self._pen_color_actions):
+                action.setChecked(i == self.current_pen_color_index)
+        if hasattr(self, '_rect_color_actions'):
+            for i, action in enumerate(self._rect_color_actions):
+                action.setChecked(i == self.current_rect_color_index)
+        if hasattr(self, '_text_color_actions'):
+            for i, action in enumerate(self._text_color_actions):
+                action.setChecked(i == self.current_text_color_index)
+
     def set_pen_color_index(self, index):
         """设置画笔颜色索引"""
         self.current_pen_color_index = index
@@ -3658,6 +4061,7 @@ class TactiReader(QMainWindow):
         self.left_pane.set_pen_color(pen_color)
         self.right_pane.set_pen_color(pen_color)
         self.update_color_display()
+        self._update_color_menu_checks()
         self.save_config()
 
     def set_rect_color_index(self, index):
@@ -3667,6 +4071,7 @@ class TactiReader(QMainWindow):
         self.left_pane.set_rect_color(rect_color)
         self.right_pane.set_rect_color(rect_color)
         self.update_color_display()
+        self._update_color_menu_checks()
         self.save_config()
 
     def set_text_color_index(self, index):
@@ -3676,6 +4081,7 @@ class TactiReader(QMainWindow):
         self.left_pane.set_text_color(text_color)
         self.right_pane.set_text_color(text_color)
         self.update_color_display()
+        self._update_color_menu_checks()
         self.save_config()
 
     def set_annotation_mode(self, mode):
@@ -3806,6 +4212,7 @@ class TactiReader(QMainWindow):
             self.locked_left_page = page_1idx
             self.render_facing()
             self.left_pane.apply_fit_mode(self.default_fit_mode)
+            self.left_pane.offset = QPointF(0, 0)
             self.left_pane.setFocus()
             self.save_config()
         else:
@@ -3815,6 +4222,7 @@ class TactiReader(QMainWindow):
             self.right_page = page_1idx
             self.render_facing()
             self.right_pane.apply_fit_mode(self.default_fit_mode)
+            self.right_pane.offset = QPointF(0, 0)
             # 跟随的左窗格也应用默认大小，位置归位
             if not self.single_page_mode and not self.left_locked:
                 self.left_pane.apply_fit_mode(self.default_fit_mode)
