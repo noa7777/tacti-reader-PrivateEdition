@@ -33,6 +33,8 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QTextEdit,
     QScrollArea,
+    QSizePolicy,
+    QLayout,
     QListWidget,
     QListWidgetItem,
     QGroupBox,
@@ -416,6 +418,370 @@ class SearchDialog(QDialog):
             if self.results_list.item(i).data(Qt.UserRole) == self.current_search_index:
                 self.results_list.setCurrentRow(i)
                 break
+
+
+class TocTreeNode:
+    """PDF TOC tree node"""
+
+    _counter = 0
+
+    def __init__(self, level, title, page, depth=1):
+        self.level = level
+        self.title = title
+        self.page = page
+        self.depth = depth
+        self.children = []
+        TocTreeNode._counter += 1
+        self.node_id = f"{depth}-{TocTreeNode._counter}-{title}"
+        self.is_leaf = True
+
+    def add_child(self, child):
+        self.children.append(child)
+        self.is_leaf = False
+
+
+class FlowLayout(QLayout):
+    """Flow layout that wraps items horizontally when width is exceeded."""
+
+    def __init__(self, parent=None, margin=0, spacing=-1):
+        super().__init__(parent)
+        if margin >= 0:
+            self.setContentsMargins(margin, margin, margin, margin)
+        self.setSpacing(spacing if spacing >= 0 else 4)
+        self._items = []
+
+    def __del__(self):
+        item = self.takeAt(0)
+        while item:
+            item = self.takeAt(0)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return Qt.Orientations(Qt.Orientation(0))
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._doLayout(QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._doLayout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margin = self.contentsMargins()
+        size += QSize(margin.left() + margin.right(), margin.top() + margin.bottom())
+        return size
+
+    def _doLayout(self, rect, testOnly):
+        x = rect.x()
+        y = rect.y()
+        lineHeight = 0
+        spaceX = self.spacing()
+        spaceY = self.spacing()
+        for item in self._items:
+            widget = item.widget()
+            nextX = x + item.sizeHint().width() + spaceX
+            if nextX - spaceX > rect.right() and lineHeight > 0:
+                x = rect.x()
+                y += lineHeight + spaceY
+                nextX = x + item.sizeHint().width() + spaceX
+                lineHeight = 0
+            if not testOnly:
+                item.setGeometry(QRect(QPoint(x, y), item.sizeHint()))
+            x = nextX
+            lineHeight = max(lineHeight, item.sizeHint().height())
+        return y + lineHeight - rect.y()
+
+
+class TocDialog(QDialog):
+    """PDF TOC navigation dialog with layer-by-layer button display"""
+
+    nodeSelected = pyqtSignal(int)  # page number
+
+    def __init__(self, pdf_toc, parent=None):
+        super().__init__(parent)
+        self.raw_toc = pdf_toc
+        self.tree_root = []
+        self.all_nodes = {}  # node_id -> node mapping for depth calculation
+        self.maxVisibleDepth = 1
+        self.selectedId = ""
+        self.expanded_branch = []  # track which branch is expanded (list of node_ids)
+
+        self.setWindowTitle("PDF 目录导航")
+        # 窗口大小：占屏幕的 3/5，并居中
+        screen_geo = QApplication.primaryScreen().availableGeometry()
+        w = int(screen_geo.width() * 0.6)
+        h = int(screen_geo.height() * 0.6)
+        self.setGeometry(
+            screen_geo.x() + (screen_geo.width() - w) // 2,
+            screen_geo.y() + (screen_geo.height() - h) // 2,
+            w,
+            h,
+        )
+
+        # Restore state from parent if available
+        if hasattr(parent, "toc_state"):
+            self.maxVisibleDepth, self.selectedId = parent.toc_state
+
+        self._build_tree()
+        self._setup_ui()
+        self._render()
+
+    def _setup_ui(self):
+        main_layout = QVBoxLayout(self)
+
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_content = QWidget()
+        self.scroll_layout = QVBoxLayout(self.scroll_content)
+        self.scroll_layout.setSpacing(8)
+        self.scroll_layout.setContentsMargins(8, 8, 8, 8)
+        self.scroll_area.setWidget(self.scroll_content)
+        main_layout.addWidget(self.scroll_area)
+
+        button_box = QHBoxLayout()
+        button_box.addStretch()
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.reject)
+        button_box.addWidget(close_btn)
+        main_layout.addLayout(button_box)
+
+    def _build_tree(self):
+        """Convert flat (level, title, page) list to nested tree structure."""
+        if not self.raw_toc:
+            return
+
+        self.tree_root = []
+        self.all_nodes = {}
+        node_stack = []  # (node, level)
+
+        for lvl, title, page in self.raw_toc:
+            node = TocTreeNode(lvl, title, page)
+            self.all_nodes[node.node_id] = node
+
+            if not node_stack:
+                self.tree_root.append(node)
+                node_stack.append((node, lvl))
+                continue
+
+            # Find proper parent
+            while node_stack and node_stack[-1][1] >= lvl:
+                node_stack.pop()
+
+            if node_stack:
+                node.depth = node_stack[-1][0].depth + 1
+                TocTreeNode._counter += 1
+                node.node_id = f"{node.depth}-{TocTreeNode._counter}-{title}"
+                self.all_nodes[node.node_id] = node
+                node_stack[-1][0].add_child(node)
+            else:
+                self.tree_root.append(node)
+
+            node_stack.append((node, lvl))
+
+    def _render(self):
+        """Clear and rebuild UI based on selectedId and expanded branch."""
+        while self.scroll_layout.count():
+            item = self.scroll_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if not self.tree_root:
+            label = QLabel("该 PDF 没有目录")
+            label.setAlignment(Qt.AlignCenter)
+            self.scroll_layout.addWidget(label)
+            return
+
+        # Determine which nodes to show at each depth
+        # Depth 1: all root nodes
+        # Depth N: only children of the selected node at depth N-1
+        nodes_by_depth = {}
+        nodes_by_depth[1] = self.tree_root
+
+        # Build the chain: find selected node and trace its ancestors
+        selected_node = self.all_nodes.get(self.selectedId)
+        ancestor_ids = set()
+        if selected_node:
+            self._trace_ancestors(self.tree_root, self.selectedId, ancestor_ids)
+
+        current_candidates = self.tree_root
+        for d in range(2, self.maxVisibleDepth + 1):
+            # Find which node at depth d-1 is selected or in ancestor chain
+            parent_node = None
+            for n in current_candidates:
+                if n.node_id in ancestor_ids or n.node_id == self.selectedId:
+                    # This node or one of its ancestors was selected
+                    if n.children:
+                        nodes_by_depth[d] = n.children
+                        current_candidates = n.children
+                        break
+            else:
+                # No selected node found at this depth, stop
+                break
+
+        # Calculate actual max depth to display
+        actual_display_depth = max(nodes_by_depth.keys()) if nodes_by_depth else 1
+
+        highlighted_ids = set(ancestor_ids)
+        if self.selectedId:
+            highlighted_ids.add(self.selectedId)
+
+        for d in range(1, actual_display_depth + 1):
+            nodes = nodes_by_depth.get(d, [])
+            if not nodes:
+                continue
+            container = self._create_level_container(d, nodes, highlighted_ids)
+            self.scroll_layout.addWidget(container)
+
+        self.scroll_layout.addStretch()
+
+    def _trace_ancestors(self, nodes, target_id, result_set):
+        """Trace ancestors of target_id and add them to result_set."""
+        for node in nodes:
+            if node.node_id == target_id:
+                return True
+            if node.children:
+                if self._trace_ancestors(node.children, target_id, result_set):
+                    result_set.add(node.node_id)
+                    return True
+        return False
+
+    def _create_level_container(self, depth, nodes, highlighted_ids):
+        """Create a bordered container with label and buttons for one depth level."""
+        container = QFrame()
+        container.setFrameShape(QFrame.StyledPanel)
+        container.setStyleSheet("QFrame { border: 1px solid #ddd; border-radius: 4px; }")
+
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(4)
+
+        # Label
+        label = QLabel(f"第{depth}层")
+        label.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(label)
+
+        # Buttons wrapper with flow layout
+        buttons_widget = QWidget()
+        buttons_layout = FlowLayout(buttons_widget, margin=0, spacing=8)
+
+        for node in nodes:
+            btn = self._create_button(node, highlighted_ids)
+            buttons_layout.addWidget(btn)
+
+        layout.addWidget(buttons_widget)
+        return container
+
+    def _create_button(self, node, highlighted_ids):
+        """Create a button for a TOC node."""
+        btn = QPushButton(node.title)
+        btn.setFlat(True)
+        btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        btn.setProperty("toc_node_id", node.node_id)
+
+        is_selected = (node.node_id in highlighted_ids)
+
+        if is_selected:
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #4A90D9;
+                    color: white;
+                    border: 1px solid #357ABD;
+                    border-radius: 3px;
+                    padding: 6px 10px;
+                    font-size: 12pt;
+                }
+                QPushButton:hover {
+                    background-color: #5BA0E9;
+                }
+            """)
+        else:
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #F0F0F0;
+                    border: 1px solid #CCC;
+                    border-radius: 3px;
+                    padding: 6px 10px;
+                    font-size: 12pt;
+                }
+                QPushButton:hover {
+                    background-color: #E0E0E0;
+                }
+            """)
+
+        btn.clicked.connect(lambda checked, n=node: self._on_node_click(n))
+        return btn
+
+    def _on_node_click(self, node):
+        """Handle node click event."""
+        self.selectedId = node.node_id
+        self.maxVisibleDepth = node.depth + 1  # Show this node's level + next level for children
+
+        if node.is_leaf:
+            # Leaf node: emit signal and close
+            self.nodeSelected.emit(node.page)
+            self.accept()
+        else:
+            # Non-leaf: re-render to show its children as next level
+            self._render()
+            # Scroll to bottom to show newly revealed level
+            self.scroll_area.verticalScrollBar().setValue(
+                self.scroll_area.verticalScrollBar().maximum()
+            )
+
+    def _collect_nodes_at_depth(self, target_depth):
+        """Collect all nodes at a specific depth level."""
+        result = []
+        self._collect_recursive(self.tree_root, target_depth, result)
+        return result
+
+    def _collect_recursive(self, nodes, target_depth, result):
+        for node in nodes:
+            if node.depth == target_depth:
+                result.append(node)
+            if node.depth < target_depth:
+                self._collect_recursive(node.children, target_depth, result)
+
+    def _get_max_depth(self):
+        """Get the maximum depth in the tree."""
+        max_d = 0
+        for node in self.all_nodes.values():
+            if node.depth > max_d:
+                max_d = node.depth
+        return max_d
+
+    def get_state(self):
+        """Return current state for persistence."""
+        return (self.maxVisibleDepth, self.selectedId)
+
+    def set_state(self, max_visible_depth, selected_id):
+        """Restore state."""
+        self.maxVisibleDepth = max_visible_depth
+        self.selectedId = selected_id
+        self._render()
 
 
 class TacticalPane(QLabel):
@@ -1794,6 +2160,23 @@ class TactiReader(QMainWindow):
         self.bookmark_layout.setAlignment(Qt.AlignTop)
         self.bookmark_layout.setSpacing(4)
         self.bookmark_layout.setContentsMargins(6, 6, 6, 6)
+
+        # 文档目录按钮（始终可见）
+        self._toc_panel_btn = QPushButton("📄 " + self.tr("Document Outline"))
+        toc_font = QFont()
+        toc_font.setFamily("Microsoft YaHei, Consolas, Courier New, monospace")
+        toc_font.setPointSize(9)
+        toc_font.setBold(True)
+        self._toc_panel_btn.setFont(toc_font)
+        self._toc_panel_btn.setStyleSheet("""
+            text-align: left;
+            padding: 4px;
+            border: none;
+            background: transparent;
+        """)
+        self._toc_panel_btn.clicked.connect(self.open_toc_dialog)
+        self.bookmark_layout.addWidget(self._toc_panel_btn)
+
         main_layout.addWidget(self.bookmark_panel)
         self.bookmark_panel_visible = True
         # 创建左右窗格
@@ -1825,7 +2208,7 @@ class TactiReader(QMainWindow):
         self.annotation_mode = None
         self.bookmarks = {}
         self.pdf_toc = []  # 存储 [(level, title, page), ...]
-        self.toc_expanded = True  # 控制是否展开
+        self.toc_state = (1, "")  # (maxVisibleDepth, selectedId)
         self.flip_multiplier = 1
         self.config_file = None
         self.left_locked = False
@@ -2029,6 +2412,11 @@ class TactiReader(QMainWindow):
         search_action = QAction(self.tr("Full-Text Search... (F)"), self)
         search_action.triggered.connect(lambda: self._trigger_shortcut(Qt.Key_F))
         nav_menu.addAction(search_action)
+
+        # PDF 目录导航...
+        toc_action = QAction(self.tr("PDF Table of Contents..."), self)
+        toc_action.triggered.connect(self.open_toc_dialog)
+        nav_menu.addAction(toc_action)
 
         # 导航回退 (Ctrl+A)
         navigate_back_action = QAction(self.tr("Navigation Back (Ctrl+A)"), self)
@@ -2405,7 +2793,6 @@ class TactiReader(QMainWindow):
             return
         try:
             raw_toc = self.doc.get_toc()
-            # 过滤无效页码，保留 (level, title, page) 元组
             self.pdf_toc = [
                 (lvl, title, max(1, min(int(page), self.total_pages)))
                 for lvl, title, page in raw_toc
@@ -2415,148 +2802,20 @@ class TactiReader(QMainWindow):
             print(f"Failed to load TOC: {e}")
             self.pdf_toc = []
 
-    def create_toc_widget(self):
-        """创建基于 QTreeWidget 的 TOC 面板（仅首次调用）"""
-        if hasattr(self, "_toc_container"):
-            return
-
-        # 创建容器
-        self._toc_container = QWidget()
-        toc_layout = QVBoxLayout(self._toc_container)
-        toc_layout.setContentsMargins(0, 0, 0, 0)
-        toc_layout.setSpacing(2)
-        # 标题按钮（可折叠整个TOC面板）
-        toggle_btn = QPushButton("📄 " + self.tr("Document Outline"))
-        # 设置字体：微软雅黑 + 等宽英文
-        font = QFont()
-        font.setFamily("Microsoft YaHei, Consolas, Courier New, monospace")
-        font.setPointSize(9)
-        toggle_btn.setFont(font)
-        toggle_btn.setCheckable(True)
-        toggle_btn.setChecked(self.toc_expanded)
-        toggle_btn.setStyleSheet("""
-            text-align: left;
-            padding: 4px;
-            font-weight: bold;
-            border: none;
-            background: transparent;
-        """)
-        toggle_btn.toggled.connect(self.toggle_toc)
-        toc_layout.addWidget(toggle_btn)
-
-        # === 核心：使用 QTreeWidget ===
-        self._toc_tree = QTreeWidget()
-        # === 防 DPI 变化导致的吞字 ===
-        self._toc_tree.setStyleSheet("QTreeWidget::item { height: 24px; }")
-        # ===========================
-        # ===========================================
-        self._toc_tree.setHeaderHidden(True)
-        self._toc_tree.setIndentation(15)
-        self._toc_tree.setItemsExpandable(True)
-        self._toc_tree.setExpandsOnDoubleClick(True)
-        self._toc_tree.setStyleSheet("""
-            QTreeWidget {
-                font-family: "Microsoft YaHei", sans-serif;
-                font-size: 9pt;
-                background-color: #f8f8f8;
-                border: 1px solid #ddd;
-                outline: 0;
-            }
-            QTreeWidget::item {
-                padding: 2px;
-                border-bottom: 1px solid #eee;
-                height: 24px; /* 初始高度，会被 setSizeHint 覆盖 */
-            }
-            QTreeWidget::item:hover {
-                background-color: #e8e8e8;
-            }
-            QTreeWidget::item:selected {
-                background-color: #d0e0ff;
-                color: black;
-            }
-        """)
-
-        # 连接点击事件
-        self._toc_tree.itemClicked.connect(self._on_toc_item_clicked)
-        self._toc_tree.setVisible(self.toc_expanded)
-        toc_layout.addWidget(self._toc_tree)
-        self.bookmark_layout.addWidget(self._toc_container)
-
-    def _fill_toc_tree(self):
-        """根据 self.pdf_toc 填充 QTreeWidget"""
-        if not hasattr(self, "_toc_tree"):
-            return
-        self._toc_tree.clear()
-
+    def open_toc_dialog(self):
+        """打开 PDF 目录导航对话框"""
         if not self.pdf_toc:
             return
-
-        # === 关键修复：获取正确的可用宽度 ===
-        # 使用书签面板的固定宽度减去必要的边距
-        available_width = self.bookmark_panel.width() - 20  # 20px 边距（左右各10px）
-        if available_width < 100:
-            available_width = 160  # 最小宽度保证可读性
-        # ===================================
-
-        parent_stack = []
-        for entry in self.pdf_toc:
-            if len(entry) >= 3:
-                level, title, page = entry[0], entry[1], entry[2]
-            else:
-                continue
-
-            display_text = f"{title} (P.{page})"
-
-            item = QTreeWidgetItem()
-
-            # === 修复吞字：加大余量 + 动态高度 ===
-            label = QLabel(display_text)
-            toc_font = QFont()
-            toc_font.setFamily("Microsoft YaHei, SimHei, Segoe UI, sans-serif")
-            toc_font.setPointSize(9)
-            label.setFont(toc_font)
-            label.setWordWrap(True)
-            label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-
-            # 关键：加大内边距（上下各加 4px）
-            label.setContentsMargins(4, 4, 4, 4)  # ← 比 setMargin 更精确
-
-            # 设置宽度
-            available_width = self.bookmark_panel.width() - 20
-            if available_width < 100:
-                available_width = 160
-            label.setFixedWidth(available_width - 50)
-
-            # 强制 layout 更新
-            label.adjustSize()
-
-            # 获取计算高度，并额外增加 6px 安全余量（防 DPI/字体渲染偏差）
-            calculated_height = label.size().height()
-            safe_height = calculated_height + 6  # ← 核心：加余量！
-
-            # 设置最终尺寸
-            item.setSizeHint(0, QSize(label.width(), safe_height))
-            # ===================================
-            item.setData(0, Qt.UserRole, page)
-
-            # 处理层级关系
-            if not parent_stack:
-                self._toc_tree.addTopLevelItem(item)
-                parent_stack.append((item, level))
-            else:
-                while parent_stack and parent_stack[-1][1] >= level:
-                    parent_stack.pop()
-                if parent_stack:
-                    parent_stack[-1][0].addChild(item)
-                else:
-                    self._toc_tree.addTopLevelItem(item)
-                parent_stack.append((item, level))
-
-            self._toc_tree.setItemWidget(item, 0, label)
-
-    def update_toc_content(self):
-        """更新 TOC 树的内容"""
-        self._fill_toc_tree()
+        try:
+            dialog = TocDialog(self.pdf_toc, parent=self)
+            dialog.nodeSelected.connect(self.jump_to_page)
+            if dialog.exec_() == QDialog.Accepted:
+                # Save state
+                self.toc_state = dialog.get_state()
+                self.save_config()
+        except Exception as e:
+            import traceback
+            QMessageBox.critical(self, "错误", f"打开目录失败:\n{traceback.format_exc()}")
 
     def _on_reading_pane_focused(self, is_left):
         """
@@ -2564,18 +2823,6 @@ class TactiReader(QMainWindow):
         :param is_left: True 表示左窗格获得焦点，False 表示右窗格。
         """
         self.last_focused_pane_is_left = is_left
-
-    def _on_toc_item_clicked(self, item, column):
-        """处理 TOC 树节点点击事件"""
-        page_num = item.data(0, Qt.UserRole)
-        if page_num is not None:
-            self.jump_to_page(page_num)
-
-    def toggle_toc(self, checked):
-        self.toc_expanded = checked
-        if hasattr(self, "_toc_tree"):  # ✅ 安全检查
-            self._toc_tree.setVisible(checked)  # ✅ 使用正确的变量名
-        self.save_config()
 
     def search_text_with_highlight(self, search_term, case_sensitive=False):
         """执行搜索并高亮结果"""
@@ -3010,6 +3257,10 @@ class TactiReader(QMainWindow):
                 self.right_pane.rotation = data["global_right_rotation"]
                 self.restore_right_view = True
 
+            # Restore TOC dialog state
+            if "toc_max_depth" in data and "toc_selected_id" in data:
+                self.toc_state = (data["toc_max_depth"], data["toc_selected_id"])
+
             bookmarks = {}
             for k, v in data.items():
                 if k != "config" and k != "annotations" and k != "page_rotations":
@@ -3057,6 +3308,10 @@ class TactiReader(QMainWindow):
             self.right_pane.offset.y(),
         ]
         data["global_right_rotation"] = self.right_pane.rotation
+        # =========================================
+        # === TOC dialog state ===
+        data["toc_max_depth"] = self.toc_state[0]
+        data["toc_selected_id"] = self.toc_state[1]
         # =========================================
         try:
             self.config_manager.save_document_config(
@@ -3962,23 +4217,20 @@ class TactiReader(QMainWindow):
             event.ignore()
 
     def refresh_bookmark_panel(self):
-        # === 第一步：清理旧的自定义书签和占位符 ===
-        # 我们只删除 QLabel (占位符) 和 BookmarkButton，保留 TOC 容器
+        # 保留文档目录按钮，移除其他所有子控件
+        widgets_to_keep = {self._toc_panel_btn}
         for i in reversed(range(self.bookmark_layout.count())):
             widget = self.bookmark_layout.itemAt(i).widget()
-            # 如果是 TOC 容器，跳过
-            if widget is getattr(self, "_toc_container", None):
-                continue
-            # 否则，移除并销毁（这包括书签按钮和<no bookmarks>标签）
-            self.bookmark_layout.removeWidget(widget)
-            widget.deleteLater()
+            if widget not in widgets_to_keep:
+                self.bookmark_layout.removeWidget(widget)
+                widget.deleteLater()
 
-        # === 第二步：重新添加自定义书签（在顶部）===
+        # 重新添加自定义书签
         bookmark_widgets = []
         if not self.bookmarks:
             placeholder = QLabel(self.tr("<no bookmarks>"))
             placeholder.setAlignment(Qt.AlignCenter)
-            placeholder.setWordWrap(True)  # ← 也支持换行
+            placeholder.setWordWrap(True)
             placeholder.setStyleSheet("color: gray; font-style: italic;")
             bookmark_widgets.append(placeholder)
         else:
@@ -3993,10 +4245,6 @@ class TactiReader(QMainWindow):
         # 将所有书签widget插入到布局的最前面（索引0开始）
         for i, widget in enumerate(bookmark_widgets):
             self.bookmark_layout.insertWidget(i, widget)
-
-        # === 第三步：确保 TOC 面板存在并更新其内容 ===
-        self.create_toc_widget()  # 首次创建
-        self.update_toc_content()  # 更新内容（滚动位置保留）
 
     def toggle_bookmark_panel(self):
         """切换书签/目录面板的显示/隐藏状态"""
