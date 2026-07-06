@@ -2,7 +2,7 @@
 
 > 专为长篇 PDF、工程手册、标准文档设计的键盘优先双栏阅读器。
 >
-> 原项目地址：[github.com/googleismylove](https://github.com/googleismylove)
+> 原项目地址：[github.com/p3psi-boo/tacti-reader](https://github.com/p3psi-boo/tacti-reader)
 
 ## 快速开始
 
@@ -40,6 +40,11 @@ python tactireader.py your_file.pdf
 | `F11` | 全屏 |
 
 批注三种工具（画笔、高亮、文字）均提供 9 色可选，默认均为**纯正红**，文字批注默认字号 25pt。
+
+**界面特性**
+
+- **颜色模式**：视图菜单支持切换颜色模式。
+- **目录交互**：全新目录面板，适合层级深、条目多的 PDF，自动展开并记忆选中状态。
 
 ## 更多文档
 
