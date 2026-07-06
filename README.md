@@ -1,60 +1,49 @@
-# TactiReader - 战术阅读器
+# TactiReader
 
-专为长篇 PDF、工程手册、标准文档、教材查阅设计的键盘优先阅读器，重点解决高频跳转、对照阅读、批注记录和跨章节关联的问题。
+> 专为长篇 PDF、工程手册、标准文档设计的键盘优先双栏阅读器。
+>
+> 原项目地址：[github.com/googleismylove](https://github.com/googleismylove)
 
 ## 快速开始
 
-1. 安装依赖
-
 ```bash
 pip install PyMuPDF PyQt5 markdown
-```
-
-不要安装 `fitz` 这个同名包，TactiReader 依赖的是 `PyMuPDF`。
-
-2. 克隆仓库
-
-```bash
-git clone https://gitee.com/Mr_newbee666/tacti-reader.git
-cd tacti-reader
-```
-
-3. 启动程序
-
-```bash
-python tactireader.py
-```
-
-4. 直接打开文件
-
-```bash
 python tactireader.py your_file.pdf
-python tactireader.py your_notebook.tactinote
 ```
 
-## 功能特点
+## 核心快捷键
 
-- 双页对照阅读，左页可锁定为参考页
-- `Q` 到 `P` 十键瞬时书签，适合盲操切换
-- 支持逻辑页码校准、快速跳页、全文搜索
-- 支持批注、导出 PDF、导出 `.tactinote` 笔记本
-- 支持多标签页和新窗口并行阅读
+| 按键 | 功能 |
+|------|------|
+| `A` / `D` | 上页 / 下页 |
+| `←` / `→` | 快退 / 快进 N 页 |
+| `1` ~ `9` | 设置翻页倍数 N |
+| `F` | 全文搜索 |
+| `G` | 跳转指定页码 |
+| `Ctrl + G` | 标定物理页码偏移 |
+| `Space` | 跳转到 Home（最远阅读页） |
+| `Ctrl + A` | 单步回退 |
+| `Q` ~ `P` | 跳转到对应书签 |
+| `Ctrl + Q` ~ `P` | 设置书签 |
+| `Alt + Q` ~ `P` | 清除书签 |
+| `C` | 切换左窗格锁定/跟随 |
+| `Z` | 单页 / 双页切换 |
+| `N` | 显示/隐藏目录面板 |
+| `X` | 重置当前窗格视图 |
+| `~` | 顺时针旋转 90° |
+| `B` / `H` / `V` | 画笔 / 高亮 / 文字批注 |
+| `Ctrl + Z` | 撤销批注 |
+| `J` | 文字选取模式 |
+| `S` | 立即保存状态 |
+| `F11` | 全屏 |
 
-## 文档索引
+## 更多文档
 
-- 文档目录：[`docs/README.md`](docs/README.md)
-- 中文使用指南：[`docs/help_zh.md`](docs/help_zh.md)
-- English user guide: [`docs/help.md`](docs/help.md)
-- 中文关于页：[`docs/about_zh.md`](docs/about_zh.md)
-- English about page: [`docs/about.md`](docs/about.md)
-- English overview: [`docs/README.en.md`](docs/README.en.md)
-- 架构优化计划：[`docs/PLAN.md`](docs/PLAN.md)
+- [中文使用指南](docs/help_zh.md)
+- [English User Guide](docs/help.md)
+- [关于 / About](docs/about_zh.md)
 
 ## 打包
-
-支持 Windows / macOS / Linux，要求 Python 3.14+。
-
-Windows:
 
 ```powershell
 pip install pyinstaller
@@ -67,43 +56,4 @@ pyinstaller --windowed --name "TactiReader" --icon=tactireader.ico ^
   tactireader.py
 ```
 
-macOS:
-
-```bash
-pip install pyinstaller
-pyinstaller --windowed --name "TactiReader" \
-  --add-data "tactireader.png:." \
-  --add-data "docs/help.md:docs" \
-  --add-data "docs/about.md:docs" \
-  --add-data "docs/help_zh.md:docs" \
-  --add-data "docs/about_zh.md:docs" \
-  tactireader.py
-```
-
-Linux:
-
-```bash
-pip install pyinstaller
-pyinstaller --windowed --name "TactiReader" \
-  --add-data "tactireader.png:." \
-  --add-data "docs/help.md:docs" \
-  --add-data "docs/about.md:docs" \
-  --add-data "docs/help_zh.md:docs" \
-  --add-data "docs/about_zh.md:docs" \
-  tactireader.py
-```
-
-macOS/Linux 使用 `:` 分隔路径，Windows 使用 `;`。
-
-## 项目结构
-
-- `tactireader.py`: 当前主程序入口
-- `main.py`: 包模式入口
-- `tacti_reader/`: 已拆分出的模块化代码
-- `docs/`: 帮助文档、关于页、英文说明和规划文档
-- `tactireader.png`: 应用图标
-- `tactireader.ico`: Windows 图标
-
-## 说明
-
-TactiReader 的目标不是替代通用 PDF 阅读器，而是为高密度知识跳转和对照阅读提供更低摩擦的工作流。
+macOS / Linux 将 `;` 改为 `:`。
