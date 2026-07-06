@@ -674,13 +674,14 @@ class TocDialog(QDialog):
 
     nodeSelected = pyqtSignal(int)  # page number
 
-    def __init__(self, pdf_toc, parent=None, theme_name='light', colors=None):
+    def __init__(self, pdf_toc, parent=None, theme_name='light', colors=None, bookmarks=None):
         super().__init__(parent)
         self.raw_toc = pdf_toc
         self.tree_root = []
         self.all_nodes = {}  # node_id -> node mapping for depth calculation
         self.selectedId = ""  # 当前选中的节点 ID（持久化）
         self.theme_name = theme_name
+        self.bookmarks = bookmarks or {}  # {"Q": {"page": 1, "name": "..."}, ...}
         if colors is None:
             W_hex, B_hex = THEMES.get(theme_name, THEMES['light'])
             self.colors = {key: transform_color(value, W_hex, B_hex) for key, value in THEME_PALETTE.items()}
@@ -782,6 +783,12 @@ class TocDialog(QDialog):
             self.scroll_layout.addWidget(label)
             return
 
+        # 书签区块（标签）—— 无书签时不显示
+        if self.bookmarks:
+            bookmark_container = self._create_bookmark_container()
+            if bookmark_container:
+                self.scroll_layout.addWidget(bookmark_container)
+
         # 找到选中节点和祖先链路
         selected_node = self.all_nodes.get(self.selectedId)
         ancestor_chain = []  # [root, ..., parent, selected]
@@ -863,6 +870,66 @@ class TocDialog(QDialog):
                     result_set.add(node.node_id)
                     return True
         return False
+
+    def _create_bookmark_container(self):
+        """创建书签区块，样式与目录层级容器一致。无书签返回 None。"""
+        if not self.bookmarks:
+            return None
+
+        container = QFrame()
+        container.setFrameShape(QFrame.StyledPanel)
+        container.setStyleSheet(f"""
+            QFrame {{
+                background-color: {self.colors['bg']};
+                border: 1px solid {self.colors['border']};
+                border-radius: 4px;
+            }}
+        """)
+
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(4)
+
+        label = QLabel("标签")
+        label.setStyleSheet(f"color: {self.colors['fg']}; font-size: 11px;")
+        layout.addWidget(label)
+
+        buttons_widget = QWidget()
+        buttons_layout = FlowLayout(buttons_widget, margin=0, spacing=8)
+
+        for char in ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"]:
+            if char not in self.bookmarks:
+                continue
+            bm = self.bookmarks[char]
+            page = bm["page"]
+            name = bm.get("name", "").strip() or f"P.{page}"
+            btn_text = f"[{char}] {name}"
+            btn = QPushButton(btn_text)
+            btn.setFlat(True)
+            btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #F0F0F0;
+                    color: #000000;
+                    border: 1px solid #CCC;
+                    border-radius: 3px;
+                    padding: 6px 10px;
+                    font-size: 12pt;
+                }}
+                QPushButton:hover {{
+                    background-color: #E0E0E0;
+                }}
+            """)
+            btn.clicked.connect(lambda checked, p=page: self._on_bookmark_click(p))
+            buttons_layout.addWidget(btn)
+
+        layout.addWidget(buttons_widget)
+        return container
+
+    def _on_bookmark_click(self, page):
+        """点击书签按钮：跳转页码 + 关闭对话框。"""
+        self.nodeSelected.emit(page)
+        self.accept()
 
     def _create_level_container(self, depth, nodes, highlighted_ids):
         """Create a bordered container with label and buttons for one depth level."""
@@ -3140,6 +3207,7 @@ class TactiReader(QMainWindow):
                 parent=self,
                 theme_name=getattr(self, 'current_theme', 'light'),
                 colors=colors,
+                bookmarks=getattr(self, 'bookmarks', {}),
             )
             dialog.nodeSelected.connect(self.jump_to_page)
             if dialog.exec_() == QDialog.Accepted:
