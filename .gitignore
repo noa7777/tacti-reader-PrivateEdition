@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.ruff_cache/
+tacti_reader/__pycache__/
+tactireader_bookmarks/
+build/
+dist/
+data/
+.git/
+*.log
+.venv/
+venv/
+.env
+.idea/
+.vscode/
