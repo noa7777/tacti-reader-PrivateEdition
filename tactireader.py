@@ -2697,8 +2697,8 @@ class TactiReader(QMainWindow):
         search_action.triggered.connect(lambda: self._trigger_shortcut(Qt.Key_F))
         nav_menu.addAction(search_action)
 
-        # PDF 目录导航... (Ctrl+L) — 快捷键由 QShortcut 全局注册，菜单项仅作展示
-        toc_action = QAction(self.tr("PDF Table of Contents... (Ctrl+L)"), self)
+        # PDF 目录导航... (L) — 快捷键由 QShortcut 全局注册，菜单项仅作展示
+        toc_action = QAction(self.tr("PDF Table of Contents... (L)"), self)
         toc_action.triggered.connect(self.open_toc_dialog)
         nav_menu.addAction(toc_action)
 
@@ -2973,9 +2973,9 @@ class TactiReader(QMainWindow):
         # 应用保存的主题
         self.apply_theme(self.current_theme)
 
-        # 注册全局快捷键：Ctrl+L 打开文档目录（不依赖菜单栏可见性）
+        # 注册全局快捷键：L 打开文档目录（不依赖菜单栏可见性）
         self._toc_shortcut = QShortcut(
-            QKeySequence("Ctrl+L"), self, self.open_toc_dialog
+            QKeySequence("L"), self, self.open_toc_dialog
         )
         self._toc_shortcut.setContext(Qt.ApplicationShortcut)
 
@@ -4887,6 +4887,11 @@ class TactiReader(QMainWindow):
             self.statusBar().showMessage(
                 self.tr("📝 Text mode (press ESC to cancel)"), 2000
             )
+            return
+
+        # L: 打开文档目录
+        if key == Qt.Key_L and modifiers == Qt.NoModifier:
+            self.open_toc_dialog()
             return
 
         # Z: Toggle single/double page mode
