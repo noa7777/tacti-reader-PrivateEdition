@@ -1603,8 +1603,20 @@ class TacticalPane(QLabel):
         if event.modifiers() == Qt.ControlModifier:
             delta = event.angleDelta().y()
             zoom_factor = 1.1 if delta > 0 else 1 / 1.1
-            self.scale_factor *= zoom_factor
-            self.scale_factor = max(0.2, min(self.scale_factor, 10.0))
+            old_scale = self.scale_factor
+            new_scale = old_scale * zoom_factor
+            new_scale = max(0.2, min(new_scale, 10.0))
+
+            mouse_pos = event.pos()
+            mx = mouse_pos.x()
+            my = mouse_pos.y()
+
+            img_x = (mx - self.offset.x()) / old_scale
+            img_y = (my - self.offset.y()) / old_scale
+
+            self.scale_factor = new_scale
+            self.offset.setX(mx - img_x * new_scale)
+            self.offset.setY(my - img_y * new_scale)
             self.update()
         else:
             scroll_amount = event.angleDelta().y() // 3
