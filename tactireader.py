@@ -2,6 +2,7 @@ import sys
 import fitz  # PyMuPDF
 import json
 import os
+import io
 import hashlib
 import zipfile
 import subprocess
@@ -24,14 +25,11 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QColorDialog,
     QDialog,
-    QVBoxLayout,
-    QHBoxLayout,
     QLineEdit,
     QTextEdit,
     QDialogButtonBox,
     QToolBar,
     QComboBox,
-    QTextEdit,
     QScrollArea,
     QSizePolicy,
     QLayout,
@@ -46,6 +44,10 @@ from PyQt5.QtWidgets import (
     QTabBar,
     QMenu,
     QShortcut,
+    QSpinBox,
+    QDoubleSpinBox,
+    QCheckBox,
+    QFormLayout,
 )
 from PyQt5.QtCore import (
     Qt,
@@ -72,6 +74,7 @@ from PyQt5.QtGui import (
     QPainterPath,
     QColor,
     QFont,
+    QFontDatabase,
     QCursor,
     QLinearGradient,
     QIcon,
@@ -784,7 +787,8 @@ class TocDialog(QDialog):
             return
 
         # 书签区块（标签）—— 无书签时不显示
-        if self.bookmarks:
+        has_bookmarks = bool(self.bookmarks)
+        if has_bookmarks:
             bookmark_container = self._create_bookmark_container()
             if bookmark_container:
                 self.scroll_layout.addWidget(bookmark_container)
@@ -831,6 +835,14 @@ class TocDialog(QDialog):
         highlighted_ids = ancestor_ids.copy()
         if self.selectedId:
             highlighted_ids.add(self.selectedId)
+
+        # 标签与第1层之间有标签按钮且第1层有按钮时，显示粗分割线
+        has_level1 = bool(nodes_by_depth.get(1))
+        if has_bookmarks and has_level1:
+            separator = QWidget()
+            separator.setFixedHeight(4)
+            separator.setStyleSheet(f"background-color: {self.colors['border']}; border: none; margin: 4px 0;")
+            self.scroll_layout.addWidget(separator)
 
         actual_max = max(nodes_by_depth.keys()) if nodes_by_depth else 1
         for d in range(1, actual_max + 1):
@@ -1066,6 +1078,402 @@ class TocDialog(QDialog):
         self._render()
 
 
+class EpubPreviewPane(QLabel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet("background: #2b2b2b;")
+        self.setMinimumSize(200, 300)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.page_pixmap = None
+        self.scale_factor = 1.0
+        self.offset = QPointF(0, 0)
+
+    def set_page(self, pixmap):
+        self.page_pixmap = pixmap
+        self.update()
+
+    def mousePressEvent(self, event):
+        if self.parent() and hasattr(self.parent(), "setFocus"):
+            self.parent().setFocus()
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self.page_pixmap:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        max_h = self.height()
+        scale = max_h / self.page_pixmap.height()
+        scaled_w = int(self.page_pixmap.width() * scale)
+        scaled_h = max_h
+        scaled = self.page_pixmap.scaled(scaled_w, scaled_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        x = (self.width() - scaled_w) // 2
+        y = 0
+        painter.drawPixmap(x, y, scaled)
+
+
+class DraggableWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.drag_pos = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.drag_pos = event.globalPos() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self.drag_pos and event.buttons() == Qt.LeftButton:
+            self.move(event.globalPos() - self.drag_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self.drag_pos = None
+
+
+def _build_apply_css(params):
+    fontsize = params.get("fontsize", 25)
+    line_height = params.get("line_height", 1.3)
+    para_spacing = params.get("para_spacing", 3)
+    indent_chars = params.get("indent_chars", 2)
+    justify = params.get("justify", False)
+    font_weight = params.get("font_weight", "normal")
+    mt = params.get("margin_top", 0)
+    mb = params.get("margin_bottom", 0)
+    ml = params.get("margin_left", 20)
+    mr = params.get("margin_right", 20)
+    wnm = {"normal": 400, "bold": 700, "lighter": 300, "bolder": 600}
+    fw = wnm.get(font_weight, 400)
+    ta = "justify" if justify else "left"
+
+    css = f"@page {{ margin-top: {mt}pt; margin-bottom: {mb}pt; margin-left: {ml}pt; margin-right: {mr}pt; }}"
+    all_sel = "*"
+    css += f"{all_sel} {{ font-weight: {fw} !important; font-size: {fontsize}pt !important; line-height: {line_height} !important; }}"
+    block_sel = "body, p, div, span, h1, h2, h3, h4, h5, h6, li, td, th, article, section, nav, header, footer, aside, blockquote, pre, code, ul, ol, dl, dt, dd, figure, figcaption"
+    css += f"{block_sel} {{ font-weight: {fw} !important; font-size: {fontsize}pt !important; line-height: {line_height} !important; }}"
+    p_sel = "p, div, li, td, th, blockquote, article, section, nav, header, footer, aside, figure, figcaption, dd, dt"
+    css += f"{p_sel} {{ text-indent: {indent_chars}em !important; text-align: {ta} !important; margin-top: 0 !important; margin-bottom: {para_spacing}pt !important; }}"
+    css += f"h1, h2, h3, h4, h5, h6 {{ text-indent: 0 !important; text-align: left !important; margin-top: {para_spacing * 2}pt !important; margin-bottom: {para_spacing}pt !important; }}"
+    css += f"ul, ol {{ margin-top: 0 !important; margin-bottom: {para_spacing}pt !important; padding-left: 2em !important; }}"
+    return css
+
+
+class EpubPreviewDialog(QDialog):
+    def __init__(self, epub_path, initial_params=None, parent=None):
+        super().__init__(parent)
+        self.epub_path = epub_path
+        self.doc = None
+        self.current_page = 0
+        self.result_params = None
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.timeout.connect(self._do_relayout)
+        self._raw_epub_data = None
+
+        if not os.path.isfile(epub_path):
+            QMessageBox.critical(self, "Error", f"EPUB file not found:\n{epub_path}")
+            return
+
+        try:
+            with open(epub_path, "rb") as f:
+                self._raw_epub_data = f.read()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to read EPUB:\n{e}")
+            return
+
+        self.setWindowTitle("EPUB Preview")
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+        self.showFullScreen()
+        self.setStyleSheet("background: #2b2b2b;")
+        self.setFocusPolicy(Qt.StrongFocus)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        pages_widget = QWidget()
+        pages_layout = QHBoxLayout(pages_widget)
+        pages_layout.setSpacing(0)
+        pages_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.left_pane = EpubPreviewPane(self)
+        self.right_pane = EpubPreviewPane(self)
+        pages_layout.addWidget(self.left_pane, 1)
+        pages_layout.addWidget(self.right_pane, 1)
+        main_layout.addWidget(pages_widget, 1)
+
+        self.status_label = QLabel("Loading...", self)
+        self.status_label.setStyleSheet("color: #cccccc; font-size: 14px;")
+        self.status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        main_layout.addWidget(self.status_label)
+
+        self.floating = DraggableWidget(self)
+        self.floating.setStyleSheet("""
+            background: rgba(40, 40, 40, 235);
+            border: 1px solid #666;
+            border-radius: 8px;
+            color: #eee;
+        """)
+        flo_layout = QVBoxLayout(self.floating)
+        flo_layout.setContentsMargins(12, 12, 12, 12)
+        flo_layout.setSpacing(8)
+
+        input_style = """
+            QSpinBox, QDoubleSpinBox, QComboBox {
+                background: #f0f0f0;
+                color: #000;
+                border: 1px solid #999;
+                border-radius: 3px;
+                padding: 2px 4px;
+            }
+            QPushButton {
+                background: #555;
+                color: #fff;
+                border: 1px solid #888;
+                border-radius: 4px;
+                padding: 5px 15px;
+                min-width: 60px;
+            }
+            QPushButton:hover { background: #777; }
+            QPushButton:pressed { background: #333; }
+            QCheckBox { color: #eee; spacing: 6px; }
+            QLabel { color: #ddd; background: transparent; }
+        """
+
+        title = QLabel("排版设置", self.floating)
+        title.setStyleSheet("font-size: 14pt; font-weight: bold; color: #fff; padding-bottom: 4px;")
+        flo_layout.addWidget(title)
+
+        self.fontsize_spin = QSpinBox(self.floating)
+        self.fontsize_spin.setRange(8, 48)
+        self.fontsize_spin.setValue(25)
+        self.fontsize_spin.setSuffix(" pt")
+        self._add_row(flo_layout, "字号:", self.fontsize_spin)
+
+        self.lineheight_spin = QDoubleSpinBox(self.floating)
+        self.lineheight_spin.setRange(1.0, 2.5)
+        self.lineheight_spin.setSingleStep(0.1)
+        self.lineheight_spin.setValue(1.3)
+        self._add_row(flo_layout, "行高:", self.lineheight_spin)
+
+        self.paraspacing_spin = QSpinBox(self.floating)
+        self.paraspacing_spin.setRange(0, 32)
+        self.paraspacing_spin.setSingleStep(2)
+        self.paraspacing_spin.setValue(3)
+        self.paraspacing_spin.setSuffix(" pt")
+        self._add_row(flo_layout, "段落间距:", self.paraspacing_spin)
+
+        self.indent_spin = QSpinBox(self.floating)
+        self.indent_spin.setRange(0, 8)
+        self.indent_spin.setValue(2)
+        self.indent_spin.setSuffix(" 字符")
+        self._add_row(flo_layout, "首行缩进:", self.indent_spin)
+
+        self.justify_check = QCheckBox("两端对齐", self.floating)
+        self.justify_check.setChecked(False)
+        flo_layout.addWidget(self.justify_check)
+
+        self.weight_combo = QComboBox(self.floating)
+        self.weight_combo.addItems(["正常", "加粗", "lighter", "bolder"])
+        self._add_row(flo_layout, "字体粗细:", self.weight_combo)
+
+        self.page_width_spin = QSpinBox(self.floating)
+        self.page_width_spin.setRange(40, 50)
+        self.page_width_spin.setValue(45)
+        self.page_width_spin.setSuffix(" %")
+        self._add_row(flo_layout, "页面宽度:", self.page_width_spin)
+
+        margin_form = QFormLayout()
+        margin_form.setSpacing(4)
+        self.margin_top = QSpinBox(self.floating); self.margin_top.setRange(0, 100); self.margin_top.setValue(0); self.margin_top.setSuffix(" pt")
+        self.margin_bottom = QSpinBox(self.floating); self.margin_bottom.setRange(0, 100); self.margin_bottom.setValue(0); self.margin_bottom.setSuffix(" pt")
+        self.margin_left = QSpinBox(self.floating); self.margin_left.setRange(0, 100); self.margin_left.setValue(20); self.margin_left.setSuffix(" pt")
+        self.margin_right = QSpinBox(self.floating); self.margin_right.setRange(0, 100); self.margin_right.setValue(20); self.margin_right.setSuffix(" pt")
+        margin_form.addRow("上边距:", self.margin_top)
+        margin_form.addRow("下边距:", self.margin_bottom)
+        margin_form.addRow("左边距:", self.margin_left)
+        margin_form.addRow("右边距:", self.margin_right)
+        flo_layout.addLayout(margin_form)
+
+        btn_layout = QHBoxLayout()
+        self.cancel_btn = QPushButton("取消", self.floating)
+        self.ok_btn = QPushButton("确认", self.floating)
+        self.ok_btn.setDefault(True)
+        self.cancel_btn.clicked.connect(self.reject)
+        self.ok_btn.clicked.connect(self._on_confirm)
+        btn_layout.addWidget(self.cancel_btn)
+        btn_layout.addWidget(self.ok_btn)
+        flo_layout.addLayout(btn_layout)
+
+        # 加载初始参数
+        if initial_params:
+            self.fontsize_spin.setValue(initial_params.get("fontsize", 25))
+            self.lineheight_spin.setValue(initial_params.get("line_height", 1.3))
+            self.paraspacing_spin.setValue(initial_params.get("para_spacing", 3))
+            self.indent_spin.setValue(initial_params.get("indent_chars", 2))
+            self.justify_check.setChecked(initial_params.get("justify", False))
+            fw = initial_params.get("font_weight", "normal")
+            weight_idx_map = {"normal": 0, "bold": 1, "lighter": 2, "bolder": 3, 400: 0, 700: 1, 300: 2, 600: 3}
+            self.weight_combo.setCurrentIndex(weight_idx_map.get(fw, 0))
+            self.margin_top.setValue(initial_params.get("margin_top", 0))
+            self.margin_bottom.setValue(initial_params.get("margin_bottom", 0))
+            self.margin_left.setValue(initial_params.get("margin_left", 20))
+            self.margin_right.setValue(initial_params.get("margin_right", 20))
+            self.page_width_spin.setValue(initial_params.get("page_width_pct", 45))
+
+        self.floating.adjustSize()
+        self.floating.move(60, 60)
+        self.floating.setStyleSheet(self.floating.styleSheet() + input_style)
+        self.floating.show()
+        self.floating.raise_()
+
+        for w in [
+            self.fontsize_spin, self.lineheight_spin,
+            self.paraspacing_spin, self.indent_spin, self.justify_check,
+            self.weight_combo, self.page_width_spin,
+            self.margin_top, self.margin_bottom,
+            self.margin_left, self.margin_right
+        ]:
+            if hasattr(w, "valueChanged"):
+                w.valueChanged.connect(self._schedule_relayout)
+            elif hasattr(w, "currentIndexChanged"):
+                w.currentIndexChanged.connect(self._schedule_relayout)
+            elif hasattr(w, "stateChanged"):
+                w.stateChanged.connect(self._schedule_relayout)
+
+        QTimer.singleShot(100, self._do_relayout)
+
+    def _add_row(self, layout, label_text, widget):
+        row = QHBoxLayout()
+        label = QLabel(label_text, self.floating)
+        label.setFixedWidth(70)
+        row.addWidget(label)
+        row.addWidget(widget, 1)
+        layout.addLayout(row)
+
+    def _schedule_relayout(self):
+        self._resize_timer.start(200)
+
+    def _get_params(self):
+        return {
+            "fontsize": self.fontsize_spin.value(),
+            "line_height": self.lineheight_spin.value(),
+            "para_spacing": self.paraspacing_spin.value(),
+            "indent_chars": self.indent_spin.value(),
+            "justify": self.justify_check.isChecked(),
+            "font_weight": ["normal", "bold", "lighter", "bolder"][self.weight_combo.currentIndex()],
+            "margin_top": self.margin_top.value(),
+            "margin_bottom": self.margin_bottom.value(),
+            "margin_left": self.margin_left.value(),
+            "margin_right": self.margin_right.value(),
+            "page_width_pct": self.page_width_spin.value(),
+        }
+
+    def _do_relayout(self):
+        if self._raw_epub_data is None:
+            return
+        self._resize_timer.stop()
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        new_doc = None
+        try:
+            params = self._get_params()
+            fontsize = params["fontsize"]
+            page_width_pct = params["page_width_pct"]
+
+            screen_w = self.screen().geometry().width()
+            page_w_px = int(screen_w * page_width_pct / 100)
+            page_h_px = self.screen().geometry().height()
+            pt_per_px = 72.0 / 96.0
+            page_w_pt = page_w_px * pt_per_px
+            page_h_pt = page_h_px * pt_per_px
+
+            new_doc = fitz.open(stream=self._raw_epub_data, filetype="epub")
+            css = _build_apply_css(params)
+            new_doc.apply_css(css)
+            new_doc.layout(fontsize=fontsize, width=page_w_pt, height=page_h_pt)
+
+            old_doc = self.doc
+            self.doc = new_doc
+            new_doc = None
+            if old_doc:
+                old_doc.close()
+
+            total = len(self.doc)
+            self.current_page = max(0, min(self.current_page, total - 1))
+            mat = fitz.Matrix(2.0, 2.0)
+            left_pm = QPixmap()
+            right_pm = QPixmap()
+            if self.current_page < total:
+                p = self.doc[self.current_page]
+                pix = p.get_pixmap(matrix=mat)
+                stride = pix.stride if pix.stride is not None else pix.width * 3
+                fmt = QImage.Format_RGBA8888 if pix.alpha else QImage.Format_RGB888
+                img = QImage(pix.samples, pix.width, pix.height, stride, fmt)
+                left_pm = QPixmap.fromImage(img.copy())
+            if self.current_page + 1 < total:
+                p = self.doc[self.current_page + 1]
+                pix = p.get_pixmap(matrix=mat)
+                stride = pix.stride if pix.stride is not None else pix.width * 3
+                fmt = QImage.Format_RGBA8888 if pix.alpha else QImage.Format_RGB888
+                img = QImage(pix.samples, pix.width, pix.height, stride, fmt)
+                right_pm = QPixmap.fromImage(img.copy())
+            self.left_pane.set_page(left_pm if not left_pm.isNull() else None)
+            self.right_pane.set_page(right_pm if not right_pm.isNull() else None)
+            lpn = self.current_page + 1 if self.current_page < total else 0
+            rpn = self.current_page + 2 if self.current_page + 1 < total else 0
+            self.status_label.setText(f"[{lpn if lpn else '-'}/{rpn if rpn else '-'}]  共 {total} 页")
+            self.floating.raise_()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.status_label.setText(f"Relayout error: {e}")
+            if new_doc:
+                try: new_doc.close()
+                except: pass
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Right, Qt.Key_Down, Qt.Key_PageDown):
+            total = len(self.doc) if self.doc else 0
+            if self.current_page + 2 < total:
+                self.current_page += 2
+                self._do_relayout()
+            event.accept()
+        elif event.key() in (Qt.Key_Left, Qt.Key_Up, Qt.Key_PageUp):
+            if self.current_page - 2 >= 0:
+                self.current_page -= 2
+                self._do_relayout()
+            event.accept()
+        elif event.key() == Qt.Key_Escape:
+            self.reject()
+        else:
+            super().keyPressEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._schedule_relayout()
+
+    def _on_confirm(self):
+        self.result_params = self._get_params()
+        if self.doc and len(self.doc) > 0:
+            try:
+                r = self.doc[0].rect
+                self.result_params["page_width"] = r.width
+                self.result_params["page_height"] = r.height
+            except Exception:
+                pass
+        self.accept()
+
+    def closeEvent(self, event):
+        if self.doc:
+            self.doc.close()
+            self.doc = None
+        super().closeEvent(event)
+
+
 class TacticalPane(QLabel):
     focused = pyqtSignal(bool)
 
@@ -1217,8 +1625,11 @@ class TacticalPane(QLabel):
                 transform, Qt.SmoothTransformation
             )
 
-        # 加载页面文本用于选取
-        if hasattr(self.window(), "doc") and self.window().doc and page_num > 0:
+        # 加载页面文本用于选取（EPUB跳过，get_text("dict")对重排文档很慢）
+        if (
+            hasattr(self.window(), "doc") and self.window().doc and page_num > 0
+            and not getattr(self.window(), "is_epub", False)
+        ):
             try:
                 self.doc_page = self.window().doc[page_num - 1]
                 self.page_text_dict = self.doc_page.get_text("dict")
@@ -1253,6 +1664,8 @@ class TacticalPane(QLabel):
                     self.scale_factor = 1.0
                 elif fit_mode == "fit_width":
                     self.scale_factor = pane_width / pw
+                elif fit_mode == "fit_height":
+                    self.scale_factor = pane_height / ph
                 elif fit_mode == "fit_page":
                     sw = pane_width / pw
                     sh = pane_height / ph
@@ -1296,6 +1709,28 @@ class TacticalPane(QLabel):
                 transform, Qt.SmoothTransformation
             )
         self.update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if (
+            self.original_pixmap
+            and not self.original_pixmap.isNull()
+            and self.width() > 0
+            and self.height() > 0
+        ):
+            main_window = self.window()
+            if (
+                main_window is not None
+                and type(main_window).__name__ == "TactiReader"
+                and hasattr(main_window, "default_fit_mode")
+                and main_window.default_fit_mode == "fit_height"
+            ):
+                ph = self.original_pixmap.height()
+                self.scale_factor = self.height() / ph
+                self.scale_factor = max(0.2, min(self.scale_factor, 10.0))
+                scaled_w = self.original_pixmap.width() * self.scale_factor
+                self.offset = QPointF((self.width() - scaled_w) / 2, 0)
+                self.update()
 
     def paintEvent(self, event):
         if not self.page_pixmap or self.page_pixmap.isNull():
@@ -1820,36 +2255,112 @@ class TacticalPane(QLabel):
 
     def _handle_right_click(self, event):
         """
-        处理右键点击事件，显示复制菜单（如果有选中文本）。
+        处理右键点击事件。如果有选中文本则显示复制菜单；否则显示功能菜单。
         """
         # 检查是否有选中文本
         has_selection = hasattr(self, "selected_text") and bool(
             self.selected_text.strip()
         )
 
-        if not has_selection:
-            return  # 如果没有选中，直接返回，不显示任何东西
+        if has_selection:
+            # 有选中文本 → 复制菜单
+            menu = QMenu(self)
+            main_window = self.window()
+            copy_action = QAction(main_window.tr("Copy"), self)
 
-        # 创建菜单
-        from PyQt5.QtWidgets import QMenu, QAction
+            def do_copy():
+                clipboard = QApplication.clipboard()
+                clipboard.setText(self.selected_text.strip())
+
+            copy_action.triggered.connect(do_copy)
+            menu.addAction(copy_action)
+            menu.exec_(event.globalPos())
+            return
+
+        # 无选中文本 → 功能菜单
+        main_window = self.window()
+        if main_window is None or type(main_window).__name__ != "TactiReader":
+            return
 
         menu = QMenu(self)
 
-        # 使用主窗口的 tr 方法进行翻译
-        main_window = self.window()
-        copy_action = QAction(main_window.tr("Copy"), self)
+        # 0. 打开电子书
+        open_action = QAction(main_window.tr("打开电子书..."), self)
+        open_action.triggered.connect(main_window.open_pdf_dialog)
+        menu.addAction(open_action)
 
-        # === 核心：复用 Ctrl+C 的逻辑 ===
-        def do_copy():
-            clipboard = QApplication.clipboard()
-            clipboard.setText(self.selected_text.strip())
-            print(f"[INFO] Copied to clipboard : {self.selected_text.strip()}")
-            # 显示状态栏提示
+        menu.addSeparator()
 
-        copy_action.triggered.connect(do_copy)
-        # ===============================
+        # 1. 颜色模式子菜单
+        theme_menu = menu.addMenu(main_window.tr("颜色模式"))
+        current_theme = getattr(main_window, 'current_theme', 'light')
+        for name in THEMES:
+            display_name = THEME_NAMES.get(name, name)
+            act = QAction(display_name, self)
+            act.setCheckable(True)
+            act.setChecked(name == current_theme)
+            act.triggered.connect(lambda checked, n=name: main_window.apply_theme(n))
+            theme_menu.addAction(act)
 
-        menu.addAction(copy_action)
+        # 2. 设置文字大小（批注文字）
+        font_size_action = QAction(main_window.tr("设置文字大小"), self)
+        font_size_action.triggered.connect(main_window.set_text_annotation_font_size)
+        menu.addAction(font_size_action)
+
+        menu.addSeparator()
+
+        # 3. 换书子菜单
+        if main_window.open_documents:
+            switch_menu = menu.addMenu(main_window.tr("换书"))
+            current_path = os.path.abspath(main_window.pdf_path) if main_window.pdf_path else ""
+            for idx, path in enumerate(main_window.open_documents):
+                fname = os.path.basename(path)
+                act = QAction(fname, self)
+                act.setCheckable(True)
+                act.setChecked(os.path.abspath(path) == current_path)
+                act.triggered.connect(lambda checked, i=idx: main_window._switch_to_document(i))
+                switch_menu.addAction(act)
+
+        # 4. 删书子菜单
+        if main_window.open_documents:
+            del_menu = menu.addMenu(main_window.tr("删书"))
+            for idx, path in enumerate(main_window.open_documents):
+                fname = os.path.basename(path)
+                act = QAction(fname, self)
+
+                def make_del_confirm(p, f):
+                    def do_del():
+                        reply = QMessageBox.warning(
+                            main_window,
+                            main_window.tr("确认删书"),
+                            main_window.tr("确定要关闭「{}」吗？").format(f),
+                            QMessageBox.Yes | QMessageBox.No,
+                            QMessageBox.No,
+                        )
+                        if reply == QMessageBox.Yes:
+                            main_window._close_document(main_window.open_documents.index(p) if p in main_window.open_documents else -1)
+                    return do_del
+
+                act.triggered.connect(make_del_confirm(path, fname))
+                del_menu.addAction(act)
+
+        menu.addSeparator()
+
+        # 5. 默认大小子菜单（与菜单栏一致）
+        fit_menu = menu.addMenu(main_window.tr("默认大小"))
+        labels = {
+            "actual_size": "实际大小",
+            "fit_width": "适合宽度",
+            "fit_page": "适合页面",
+        }
+        current_fit = getattr(main_window, 'default_fit_mode', 'fit_page')
+        for mode, label in labels.items():
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setChecked(mode == current_fit)
+            act.triggered.connect(lambda _, m=mode: main_window._set_fit_mode(m))
+            fit_menu.addAction(act)
+
         menu.exec_(event.globalPos())
 
     def _on_text_input_changed(self):
@@ -2438,7 +2949,7 @@ class TactiReader(QMainWindow):
             f
             for f in global_config.get("open_documents", [])
             if os.path.isfile(f)
-            and (f.lower().endswith(".pdf") or f.lower().endswith(".tactinote"))
+            and (f.lower().endswith(".pdf") or f.lower().endswith(".tactinote") or f.lower().endswith(".epub"))
         ]
         # 保存上次阅读的文档
         self.last_read_document = global_config.get("current_document", "")
@@ -2452,6 +2963,8 @@ class TactiReader(QMainWindow):
         # ==========================
         self.doc = None
         self.total_pages = 0
+        self.is_epub = False
+        self.epub_layout_params = None
         self.last_focused_pane = "right"  # 可选值: 'left' 或 'right'
         self._theme_page_cache = {}  # 主题页面缓存：(page_num, theme) -> QPixmap
         # Auto-show help on first run (if no bookmarks/config exist)
@@ -2544,7 +3057,7 @@ class TactiReader(QMainWindow):
         self.pdf_toc = []  # 存储 [(level, title, page), ...]
         self.toc_state = (1, "")  # (maxVisibleDepth, selectedId)
         self.text_annotation_font_size = 25  # 文字批注字体大小（pt）
-        self.flip_multiplier = 1
+        self.flip_multiplier = 2
         self.config_file = None
         self.left_locked = False
         self.locked_left_page = 1
@@ -2635,19 +3148,19 @@ class TactiReader(QMainWindow):
         # ===================================================
         # --- 文件 (File) ---
         file_menu = menubar.addMenu(self.tr("File"))
-        open_action = QAction(self.tr("Open PDF..."), self)
+        open_action = QAction(self.tr("打开电子书..."), self)
         open_action.triggered.connect(self.open_pdf_dialog)
         file_menu.addAction(open_action)
 
-        save_as_pdf_action = QAction(self.tr("Save As PDF..."), self)
-        save_as_pdf_action.triggered.connect(self.save_as_pdf)
-        file_menu.addAction(save_as_pdf_action)
+        self.save_as_pdf_action = QAction(self.tr("另存为 PDF..."), self)
+        self.save_as_pdf_action.triggered.connect(self.save_as_pdf)
+        file_menu.addAction(self.save_as_pdf_action)
 
         file_menu.addSeparator()
 
-        export_notebook_action = QAction(self.tr("Export Notebook..."), self)
-        export_notebook_action.triggered.connect(self.export_notebook)
-        file_menu.addAction(export_notebook_action)
+        self.export_notebook_action = QAction(self.tr("导出笔记..."), self)
+        self.export_notebook_action.triggered.connect(self.export_notebook)
+        file_menu.addAction(self.export_notebook_action)
 
         import_notebook_action = QAction(self.tr("Open Notebook..."), self)
         import_notebook_action.triggered.connect(self.import_notebook)
@@ -2697,6 +3210,12 @@ class TactiReader(QMainWindow):
             lambda: self._trigger_shortcut(Qt.Key_F11)
         )
         view_menu.addAction(toggle_fullscreen_action)
+
+        # EPUB 重新排版设置
+        self.epub_relayout_action = QAction(self.tr("EPUB 排版设置..."), self)
+        self.epub_relayout_action.triggered.connect(self._epub_relayout_settings)
+        self.epub_relayout_action.setVisible(False)
+        view_menu.addAction(self.epub_relayout_action)
 
         view_menu.addSeparator()
 
@@ -3095,10 +3614,13 @@ class TactiReader(QMainWindow):
             # 命令行参数优先
             if pdf_path.lower().endswith(".tactinote"):
                 self.import_notebook_from_path(pdf_path)
-                self.update_ui_text()  # ← 新增：更新标题
+                self.update_ui_text()
+            elif pdf_path.lower().endswith(".epub"):
+                self.load_epub(pdf_path)
+                self.update_ui_text()
             elif pdf_path.lower().endswith(".pdf"):
                 self.load_pdf(pdf_path)
-                self.update_ui_text()  # ← 新增：更新标题
+                self.update_ui_text()
         elif self.open_documents:
             # 优先加载上次阅读的文档，否则加载第一本
             last_read_abs = os.path.abspath(self.last_read_document) if self.last_read_document else ""
@@ -3114,6 +3636,9 @@ class TactiReader(QMainWindow):
             if initial_doc:
                 if initial_doc.lower().endswith(".tactinote"):
                     self.import_notebook_from_path(initial_doc)
+                    self.update_ui_text()
+                elif initial_doc.lower().endswith(".epub"):
+                    self.load_epub(initial_doc)
                     self.update_ui_text()
                 elif initial_doc.lower().endswith(".pdf"):
                     self.load_pdf(initial_doc)
@@ -3146,6 +3671,8 @@ class TactiReader(QMainWindow):
                 self.doc.close()
             self.doc = fitz.open(pdf_path)
             self.pdf_path = notebook_path
+            self.is_epub = False
+            self.epub_layout_params = None
             self.total_pages = len(self.doc)
 
             # === 清空页面缓存，避免旧文档页面残留 ===
@@ -3160,7 +3687,7 @@ class TactiReader(QMainWindow):
             self.page_rotations = {}
             self.page_number_offset = 0
             self.home_page = 1
-            self.flip_multiplier = 1
+            self.flip_multiplier = 2
             self.single_page_mode = False
             self.right_page = 1
             self.left_locked = False
@@ -3191,6 +3718,7 @@ class TactiReader(QMainWindow):
                 self, self.tr("Error"), f"{self.tr('Failed to import notebook')}: {e}"
             )
         self.update_document_tabs()
+        self.epub_relayout_action.setVisible(False)
 
     def load_pdf_toc(self):
         """加载 PDF 内置书签（目录）并构建扁平列表"""
@@ -3582,9 +4110,9 @@ class TactiReader(QMainWindow):
     def open_pdf_dialog(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            self.tr("Open PDF or Notebook"),
+            self.tr("Open PDF, EPUB or Notebook"),
             "",
-            self.tr("PDF Files (*.pdf);;TactiReader Notebook (*.tactinote)"),
+            self.tr("PDF/EPUB Files (*.pdf *.epub);;PDF Files (*.pdf);;EPUB Files (*.epub);;TactiReader Notebook (*.tactinote);;All Files (*)"),
         )
         if file_path:
             abs_file_path = os.path.abspath(file_path)
@@ -3614,8 +4142,11 @@ class TactiReader(QMainWindow):
             self.update_document_tabs()
 
             # 加载新文档
-            if file_path.lower().endswith(".tactinote"):
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext == ".tactinote":
                 self.import_notebook_from_path(file_path)
+            elif ext == ".epub":
+                self.load_epub(file_path)
             else:
                 self.load_pdf(file_path)
 
@@ -3648,6 +4179,10 @@ class TactiReader(QMainWindow):
                 if fp.lower().endswith(".tactinote"):
                     action.triggered.connect(
                         lambda checked, path=fp: self.import_notebook_from_path(path)
+                    )
+                elif fp.lower().endswith(".epub"):
+                    action.triggered.connect(
+                        lambda checked, path=fp: self.load_epub(path)
                     )
                 else:
                     action.triggered.connect(
@@ -3744,6 +4279,8 @@ class TactiReader(QMainWindow):
         try:
             self.doc = fitz.open(pdf_path)
             self.pdf_path = pdf_path
+            self.is_epub = False
+            self.epub_layout_params = None
             self.total_pages = len(self.doc)
 
             # === 清空页面缓存，避免旧文档页面残留 ===
@@ -3758,7 +4295,7 @@ class TactiReader(QMainWindow):
             self.page_rotations = {}
             self.page_number_offset = 0
             self.home_page = 1
-            self.flip_multiplier = 1
+            self.flip_multiplier = 2
             self.single_page_mode = False
             self.right_page = 1
             self.left_locked = False
@@ -3779,12 +4316,206 @@ class TactiReader(QMainWindow):
 
             # 更新标签栏（现在 self.pdf_path 已更新）
             self.update_document_tabs()
+            self.epub_relayout_action.setVisible(False)
+            self.save_as_pdf_action.setEnabled(True)
+            self.export_notebook_action.setEnabled(True)
 
         except Exception as e:
             QMessageBox.critical(
                 self,
                 self.tr("Error"),
                 self.tr("Failed to open PDF:\n{}").format(str(e)),
+            )
+            if abs_path in self.open_documents:
+                self.open_documents.remove(abs_path)
+                self.save_global_config()
+                self.update_document_tabs()
+
+    def _build_epub_css(self, params):
+        return _build_apply_css(params)
+
+    def _load_epub_config(self, config_path):
+        try:
+            if not os.path.isfile(config_path):
+                return None
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("epub_layout", None)
+        except Exception as e:
+            print(f"Load EPUB config error: {e}")
+            return None
+
+    def _save_epub_config(self, config_path, params):
+        try:
+            data = {}
+            if os.path.isfile(config_path):
+                with open(config_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            data["epub_layout"] = params
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"Save EPUB config error: {e}")
+
+    def _apply_epub_layout(self, params):
+        if not self.is_epub or not self.pdf_path:
+            return
+        try:
+            if self.doc:
+                self.doc.close()
+                self.doc = None
+
+            fontsize = params.get("fontsize", 25)
+
+            if not hasattr(self, '_epub_raw_cache') or self._epub_raw_cache_path != self.pdf_path:
+                with open(self.pdf_path, "rb") as f:
+                    self._epub_raw_cache = f.read()
+                self._epub_raw_cache_path = self.pdf_path
+
+            saved_w = params.get("page_width", None)
+            saved_h = params.get("page_height", None)
+            if saved_w is not None and saved_h is not None and saved_w > 0 and saved_h > 0:
+                page_w_pt = saved_w
+                page_h_pt = saved_h
+            else:
+                page_width_pct = params.get("page_width_pct", 45)
+                screen = self.screen()
+                if screen:
+                    screen_geom = screen.geometry()
+                    screen_w = screen_geom.width()
+                    screen_h = screen_geom.height()
+                else:
+                    screen_w = 1920
+                    screen_h = 1080
+                page_w_px = int(screen_w * page_width_pct / 100)
+                page_h_px = screen_h
+                pt_per_px = 72.0 / 96.0
+                page_w_pt = page_w_px * pt_per_px
+                page_h_pt = page_h_px * pt_per_px
+
+            self.doc = fitz.open(stream=self._epub_raw_cache, filetype="epub")
+            css = _build_apply_css(params)
+            self.doc.apply_css(css)
+
+            self.doc.layout(fontsize=fontsize, width=page_w_pt, height=page_h_pt)
+            self.total_pages = len(self.doc)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"EPUB layout error: {e}")
+
+    def _epub_relayout_settings(self):
+        if not self.is_epub or not self.pdf_path:
+            return
+        reply = QMessageBox.warning(
+            self,
+            self.tr("EPUB 排版设置"),
+            self.tr("重新进入排版设置将丢弃当前书籍的所有批注和书签，是否继续？"),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        epub_path = self.pdf_path
+        self.load_epub(epub_path, force_preview=True)
+
+    def load_epub(self, epub_path, force_preview=False):
+        abs_path = os.path.abspath(epub_path)
+        if abs_path not in self.open_documents:
+            self.open_documents.append(abs_path)
+            self.save_global_config()
+
+        current_abs = os.path.abspath(self.pdf_path) if self.pdf_path else None
+        if current_abs == abs_path and not force_preview:
+            self.update_document_tabs()
+            return
+        self.add_to_recent_files(epub_path)
+
+        if self.pdf_path:
+            self.save_config()
+        if self.doc:
+            self.doc.close()
+
+        try:
+            doc = fitz.open(epub_path)
+            if not doc.is_reflowable:
+                QMessageBox.warning(self, "Warning", "This file is not a reflowable EPUB.")
+                doc.close()
+                if abs_path in self.open_documents:
+                    self.open_documents.remove(abs_path)
+                    self.save_global_config()
+                    self.update_document_tabs()
+                return
+            doc.close()
+            doc = None
+
+            self.config_file = get_config_path(epub_path)
+            saved_params = self._load_epub_config(self.config_file)
+
+            if saved_params is None or force_preview:
+                init_p = saved_params if force_preview and saved_params else None
+                if force_preview and self.epub_layout_params:
+                    init_p = self.epub_layout_params
+                dlg = EpubPreviewDialog(epub_path, init_p, self)
+                result = dlg.exec_()
+                if result != QDialog.Accepted or dlg.result_params is None:
+                    if abs_path in self.open_documents:
+                        self.open_documents.remove(abs_path)
+                        self.save_global_config()
+                        self.update_document_tabs()
+                    if len(self.open_documents) > 0:
+                        self._switch_to_document(len(self.open_documents) - 1)
+                    return
+                saved_params = dlg.result_params
+                self._save_epub_config(self.config_file, saved_params)
+
+            self.pdf_path = epub_path
+            self.is_epub = True
+            self.epub_layout_params = saved_params
+            self.doc = None
+
+            self._theme_page_cache.clear()
+
+            self.notebook_source_path = None
+            self.annotations = {}
+            self.bookmarks = {}
+            self.page_rotations = {}
+            self.page_number_offset = 0
+            self.home_page = 1
+            self.flip_multiplier = 2
+            self.single_page_mode = False
+            self.right_page = 1
+            self.left_locked = False
+            self.locked_left_page = 1
+            self.restore_left_view = False
+            self.restore_right_view = False
+            self.search_highlights = {}
+            self.current_search_term = ""
+
+            self.default_fit_mode = "fit_height"
+            self._apply_epub_layout(saved_params)
+            self.total_pages = len(self.doc)
+
+            self.load_config()
+            if self.is_epub:
+                self.default_fit_mode = "fit_height"
+                self._build_fit_menu()
+            self.load_pdf_toc()
+            self.refresh_bookmark_panel()
+            self.render_facing()
+            QTimer.singleShot(0, self.apply_initial_view)
+            self.right_pane.setFocus()
+            self.update_status()
+            self.update_document_tabs()
+            self.epub_relayout_action.setVisible(True)
+            self.save_as_pdf_action.setEnabled(False)
+            self.export_notebook_action.setEnabled(False)
+
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                self.tr("Error"),
+                self.tr("Failed to open EPUB:\n{}").format(str(e)),
             )
             if abs_path in self.open_documents:
                 self.open_documents.remove(abs_path)
@@ -3798,7 +4529,7 @@ class TactiReader(QMainWindow):
                 return
 
             config = data.get("config", {})
-            self.flip_multiplier = config.get("multiplier", 1)
+            self.flip_multiplier = config.get("multiplier", 2)
             self.home_page = max(1, min(config.get("home_page", 1), self.total_pages))
             self.right_page = max(1, min(config.get("last_page", 1), self.total_pages))
             self.single_page_mode = config.get("single_page_mode", False)
@@ -3937,12 +4668,12 @@ class TactiReader(QMainWindow):
             global_config["recent_files"] = recent_files_clean[-10:]  # 保留最近10个
 
             # 新增：保存已打开文档
-            # 保存已打开文档（支持 .pdf 和 .tactinote）
+            # 保存已打开文档（支持 .pdf、.epub 和 .tactinote）
             open_docs_clean = [
                 f
                 for f in self.open_documents
                 if os.path.isfile(f)
-                and (f.lower().endswith(".pdf") or f.lower().endswith(".tactinote"))
+                and (f.lower().endswith(".pdf") or f.lower().endswith(".epub") or f.lower().endswith(".tactinote"))
             ]
             global_config["open_documents"] = open_docs_clean[-10:]  # 保留最近10个
 
@@ -4062,6 +4793,8 @@ class TactiReader(QMainWindow):
 
             if new_path.lower().endswith(".tactinote"):
                 self.import_notebook_from_path(new_path)
+            elif new_path.lower().endswith(".epub"):
+                self.load_epub(new_path)
             else:
                 self.load_pdf(new_path)
         else:
@@ -4098,7 +4831,8 @@ class TactiReader(QMainWindow):
 
         try:
             page = self.doc[page_num]
-            mat = fitz.Matrix(2.0, 2.0)
+            is_epub = getattr(self, 'is_epub', False)
+            mat = fitz.Matrix(1.5, 1.5) if is_epub else fitz.Matrix(2.0, 2.0)
             pix = page.get_pixmap(matrix=mat)
             stride = pix.stride if pix.stride is not None else pix.width * 3
             img_format = QImage.Format_RGBA8888 if pix.alpha else QImage.Format_RGB888
@@ -4110,8 +4844,9 @@ class TactiReader(QMainWindow):
                 W_hex, B_hex = THEMES[self.current_theme]
                 pixmap = transform_pixmap(pixmap, W_hex, B_hex)
 
-            # 限制缓存大小，避免内存无限增长
-            if len(self._theme_page_cache) >= 20:
+            # 限制缓存大小，避免内存无限增长（EPUB缓存更大，页数多）
+            cache_limit = 40 if is_epub else 20
+            if len(self._theme_page_cache) >= cache_limit:
                 self._theme_page_cache.pop(next(iter(self._theme_page_cache)))
             self._theme_page_cache[cache_key] = pixmap
 
@@ -4253,7 +4988,14 @@ class TactiReader(QMainWindow):
             page_display = f"L.{left_logical} R.{right_logical}"
         # ===================================
 
-        msg = f"{mode_str} | {page_display} | Home: P.{self.home_page + self.page_number_offset} | ×{self.flip_multiplier} {lock_icon} | Annot: {annotation_mode}{search_status}"
+        if self.is_epub:
+            left_pn = left_logical if left_logical > 0 else "-"
+            right_pn = right_logical if right_logical > 0 else "-"
+            epub_suffix = f"    [{left_pn}/{right_pn}]"
+        else:
+            epub_suffix = ""
+
+        msg = f"{mode_str} | {page_display} | Home: P.{self.home_page + self.page_number_offset} | ×{self.flip_multiplier} {lock_icon} | Annot: {annotation_mode}{search_status}{epub_suffix}"
         self.statusBar().showMessage(msg)
 
     def update_color_display(self):
@@ -5125,7 +5867,7 @@ class TactiReader(QMainWindow):
             if reply == QMessageBox.Yes:
                 self.home_page = 1
                 self.bookmarks = {}
-                self.flip_multiplier = 1
+                self.flip_multiplier = 2
                 self.single_page_mode = False
                 self.left_locked = False
                 self.locked_left_page = 1
@@ -5260,9 +6002,9 @@ class TactiReader(QMainWindow):
             self.statusBar().setVisible(True)
         else:
             self.showFullScreen()
-            # 进入全屏时隐藏菜单栏和状态栏
+            # 进入全屏时：EPUB 显示状态栏，PDF 隐藏状态栏；菜单栏始终隐藏
             self.menuBar().setVisible(False)
-            self.statusBar().setVisible(False)
+            self.statusBar().setVisible(self.is_epub)
 
     def toggle_text_selection_mode(self):
         """全局切换文字选取模式（同步左右窗格）"""
