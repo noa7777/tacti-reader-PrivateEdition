@@ -6059,8 +6059,131 @@ class MarkdownViewer(QDialog):
         try:
             with open(full_path, "r", encoding="utf-8") as f:
                 md_content = f.read()
-            html = markdown.markdown(md_content, extensions=["fenced_code"])
-            self.text_edit.setHtml(html)
+            html = markdown.markdown(
+                md_content,
+                extensions=["fenced_code", "tables", "toc"],
+            )
+            styled_html = f"""
+<style>
+body {{
+    font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+    font-size: 18px;
+    line-height: 1.9;
+    color: #2c3e50;
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 28px 32px;
+}}
+h1 {{
+    font-size: 30px;
+    color: #1a1a1a;
+    border-bottom: 3px solid #3498db;
+    padding-bottom: 14px;
+    margin-top: 10px;
+    margin-bottom: 28px;
+    font-weight: 600;
+}}
+h2 {{
+    font-size: 24px;
+    color: #1a1a1a;
+    border-left: 5px solid #3498db;
+    padding-left: 14px;
+    margin-top: 36px;
+    margin-bottom: 18px;
+    font-weight: 600;
+}}
+h3 {{
+    font-size: 20px;
+    color: #2c3e50;
+    margin-top: 28px;
+    margin-bottom: 14px;
+    font-weight: 600;
+}}
+p {{
+    margin: 14px 0;
+    text-align: justify;
+}}
+strong {{
+    color: #c0392b;
+    font-weight: 600;
+}}
+em {{
+    color: #7f8c8d;
+}}
+ul, ol {{
+    margin: 14px 0;
+    padding-left: 28px;
+}}
+li {{
+    margin: 8px 0;
+    line-height: 1.8;
+}}
+table {{
+    width: 100%;
+    border-collapse: collapse;
+    margin: 24px 0;
+    font-size: 16px;
+}}
+th {{
+    background-color: #3498db;
+    color: white;
+    font-weight: 600;
+    text-align: left;
+    padding: 12px 16px;
+    border: 1px solid #2980b9;
+}}
+td {{
+    padding: 11px 16px;
+    border: 1px solid #dce6f0;
+    color: #2c3e50;
+}}
+tr:nth-child(even) {{
+    background-color: #f7fafc;
+}}
+tr:hover {{
+    background-color: #edf5fd;
+}}
+hr {{
+    border: none;
+    border-top: 1px solid #e0e6ed;
+    margin: 32px 0;
+}}
+blockquote {{
+    border-left: 4px solid #f39c12;
+    background-color: #fef9ef;
+    padding: 14px 20px;
+    margin: 18px 0;
+    color: #7d6608;
+    font-style: italic;
+}}
+code {{
+    background-color: #f0f3f6;
+    color: #e74c3c;
+    padding: 3px 7px;
+    border-radius: 3px;
+    font-family: Consolas, Monaco, monospace;
+    font-size: 15px;
+}}
+pre {{
+    background-color: #2c3e50;
+    color: #ecf0f1;
+    padding: 18px;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 18px 0;
+}}
+pre code {{
+    background: none;
+    color: #ecf0f1;
+    padding: 0;
+    font-size: 15px;
+}}
+</style>
+<body>
+{html}
+</body>
+"""
+            self.text_edit.setHtml(styled_html)
         except Exception as e:
             self.text_edit.setPlainText(f"无法加载帮助文件: {md_file}\n错误: {str(e)}")
 
