@@ -138,10 +138,15 @@ def _map_channel(v_in, b, w):
     return max(0, min(255, round(b + (w - b) * (v_in / 255.0))))
 
 
-def transform_pixmap(pixmap, W_hex, B_hex, white_threshold=200):
+def transform_pixmap(pixmap, W_hex, B_hex, white_threshold=200, grayscale=False):
     """
     对 QPixmap 中接近白色的像素逐通道应用主题映射。
     使用 Pillow 的 C 级查表/合成操作，避免 Python 逐像素循环。
+
+    grayscale=True 时启用电纸书模式：
+    - 全图转灰度
+    - 白色映射为5500K色温 (#F5F0E1)
+    - 亮度降至85%
     """
     if pixmap.isNull() or not W_hex or not B_hex:
         return pixmap
@@ -163,32 +168,52 @@ def transform_pixmap(pixmap, W_hex, B_hex, white_threshold=200):
         W = _hex_to_rgb(W_hex)
         B = _hex_to_rgb(B_hex)
 
-        # 查找表
-        lut_r = [_map_channel(i, B[0], W[0]) for i in range(256)]
-        lut_g = [_map_channel(i, B[1], W[1]) for i in range(256)]
-        lut_b = [_map_channel(i, B[2], W[2]) for i in range(256)]
+        if grayscale:
+            # 电纸书模式：灰度转换 + 色温 + 亮度
+            gray = pil_img.convert('L')
 
-        # 分离通道
-        r, g, b = pil_img.split()
+            # 亮度85%
+            gray = gray.point(lambda x: int(x * 0.85))
 
-        # 构建白色背景 mask：RGB 均 >= white_threshold 的像素
-        def _mask_band(band):
-            return band.point(lambda v: 255 if v >= white_threshold else 0, '1')
+            # 色温5500K映射：灰度值 -> 暖白色调
+            # 白色(255) -> #F5F0E1 (245, 240, 225)
+            # 黑色(0) -> #1A1A1A (26, 26, 26)
+            lut_r = [int(B[0] + (W[0] - B[0]) * (v / 255.0)) for v in range(256)]
+            lut_g = [int(B[1] + (W[1] - B[1]) * (v / 255.0)) for v in range(256)]
+            lut_b = [int(B[2] + (W[2] - B[2]) * (v / 255.0)) for v in range(256)]
 
-        mask = ImageChops.logical_and(_mask_band(r), _mask_band(g))
-        mask = ImageChops.logical_and(mask, _mask_band(b))
+            r = gray.point(lut_r)
+            g = gray.point(lut_g)
+            b = gray.point(lut_b)
+            result = Image.merge('RGB', (r, g, b))
+        else:
+            # 普通主题模式
+            # 查找表
+            lut_r = [_map_channel(i, B[0], W[0]) for i in range(256)]
+            lut_g = [_map_channel(i, B[1], W[1]) for i in range(256)]
+            lut_b = [_map_channel(i, B[2], W[2]) for i in range(256)]
 
-        # 应用查找表
-        r_mapped = r.point(lut_r)
-        g_mapped = g.point(lut_g)
-        b_mapped = b.point(lut_b)
+            # 分离通道
+            r, g, b = pil_img.split()
 
-        # 只在 mask 区域使用映射后的通道，其余保持原样
-        r_result = Image.composite(r_mapped, r, mask)
-        g_result = Image.composite(g_mapped, g, mask)
-        b_result = Image.composite(b_mapped, b, mask)
+            # 构建白色背景 mask：RGB 均 >= white_threshold 的像素
+            def _mask_band(band):
+                return band.point(lambda v: 255 if v >= white_threshold else 0, '1')
 
-        result = Image.merge('RGB', (r_result, g_result, b_result))
+            mask = ImageChops.logical_and(_mask_band(r), _mask_band(g))
+            mask = ImageChops.logical_and(mask, _mask_band(b))
+
+            # 应用查找表
+            r_mapped = r.point(lut_r)
+            g_mapped = g.point(lut_g)
+            b_mapped = b.point(lut_b)
+
+            # 只在 mask 区域使用映射后的通道，其余保持原样
+            r_result = Image.composite(r_mapped, r, mask)
+            g_result = Image.composite(g_mapped, g, mask)
+            b_result = Image.composite(b_mapped, b, mask)
+
+            result = Image.merge('RGB', (r_result, g_result, b_result))
 
         # PIL Image -> PNG bytes -> QPixmap
         output = BytesIO()
@@ -208,6 +233,7 @@ THEMES = {
     'yellow': ('#F5EFD7', '#141412'),
     'green': ('#C7EDCC', '#101310'),
     'heguang': ('#E0E0E0', '#141414'),
+    'eink': ('#F5F0E1', '#1A1A1A'),
 }
 
 # 基础调色板
@@ -231,6 +257,7 @@ THEME_NAMES = {
     'yellow': '黄色',
     'green': '绿色',
     'heguang': '和光',
+    'eink': '电纸书',
 }
 
 
@@ -4842,7 +4869,8 @@ class TactiReader(QMainWindow):
             # 非浅色主题下，对页面像素应用主题映射
             if getattr(self, 'current_theme', 'light') != 'light':
                 W_hex, B_hex = THEMES[self.current_theme]
-                pixmap = transform_pixmap(pixmap, W_hex, B_hex)
+                is_eink = self.current_theme == 'eink'
+                pixmap = transform_pixmap(pixmap, W_hex, B_hex, grayscale=is_eink)
 
             # 限制缓存大小，避免内存无限增长（EPUB缓存更大，页数多）
             cache_limit = 40 if is_epub else 20
