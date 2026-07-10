@@ -143,11 +143,31 @@ def transform_pixmap(pixmap, W_hex, B_hex, white_threshold=200, grayscale=False)
     对 QPixmap 中接近白色的像素逐通道应用主题映射。
     使用 Pillow 的 C 级查表/合成操作，避免 Python 逐像素循环。
 
-    grayscale=True 时启用电纸书模式：
-    - 全图转灰度
-    - 白色映射为5500K色温 (#F5F0E1)
-    - 亮度降至85%
+    grayscale=False  : 普通主题映射（维持原色，仅替换白/黑端点）
+    grayscale='eink' : 电纸书模式 → BT.601灰度 + gamma=1.15 + 暖白映射
+    grayscale='night': 黑夜模式   → BT.601灰度 + gamma=0.55 + 颜色反转
     """
+
+    # --- 纯 numpy 版（用于测试，不依赖 PyQt/PIL）---
+    # 输入：arr (H,W,3) uint8 RGB
+    # 输出：处理后的数组
+    #
+    # gamma_dict = {'eink': 1.15, 'night': 0.55}
+    #
+    # img = arr.astype(np.float32)
+    # Y = 0.299*img[:,:,0] + 0.587*img[:,:,1] + 0.114*img[:,:,2]
+    # gamma = gamma_dict.get(grayscale, 1.0)  # grayscale='eink' or 'night'
+    # t = (Y / 255.0) ** gamma
+    # out = np.empty_like(img)
+    # # 统一公式: out = text_color * (1-t) + bg_color * t
+    # #         = B_ch + (W_ch - B_ch) * t
+    # # 对 eink: B=(0,0,0), W=(253,247,239) → out = W * t
+    # # 对 night: B=(232,232,232), W=(42,42,42) → out = 232 - 190*t
+    # R = B[0] + (W[0] - B[0]) * t
+    # G = B[1] + (W[1] - B[1]) * t
+    # B = B[2] + (W[2] - B[2]) * t
+    # out[:,:,0] = R; out[:,:,1] = G; out[:,:,2] = B
+    # return out.round().astype(np.uint8)
     if pixmap.isNull() or not W_hex or not B_hex:
         return pixmap
 
@@ -169,23 +189,33 @@ def transform_pixmap(pixmap, W_hex, B_hex, white_threshold=200, grayscale=False)
         B = _hex_to_rgb(B_hex)
 
         if grayscale:
-            # 电纸书模式：灰度转换 + 色温 + 亮度
+            # === 统一灰度映射框架：支持 eink(电纸书)和night(黑夜)两种模式 ===
+            #   共同点：BT.601灰度化 → 伽马校正 → 端点色温映射
+            #   区别：
+            #     * eink:  B=(0,0,0)纯黑, W=(253,247,239)暖白, gamma=1.15
+            #       纯黑不变，纯白变暖；文字深灰，背景暖白
+            #     * night: B=(232,232,232)浅字, W=(42,42,42)深底, gamma=0.55
+            #       颜色反转 + 6500K冷白；文字亮灰，背景深灰
+            #
+            #   统一公式：LUT[v] = B_ch + (W_ch - B_ch) × (v/255)^gamma
+            #
+            #   v=0(原黑色)时：LUT=B → eink:纯黑, night:浅色文字
+            #   v=255(原白色)时：LUT=W → eink:暖白, night:深色背景
+            #   中间灰度按伽马曲线在B和W之间插值
+
+            gamma = 1.15 if grayscale == 'eink' else 0.55
+
+            # 预计算 LUT：统一一张表搞定灰度+伽马+色温映射
+            lut_r = [int(B[0] + (W[0] - B[0]) * ((v / 255.0) ** gamma)) for v in range(256)]
+            lut_g = [int(B[1] + (W[1] - B[1]) * ((v / 255.0) ** gamma)) for v in range(256)]
+            lut_b = [int(B[2] + (W[2] - B[2]) * ((v / 255.0) ** gamma)) for v in range(256)]
+
             gray = pil_img.convert('L')
-
-            # 亮度85%
-            gray = gray.point(lambda x: int(x * 0.85))
-
-            # 色温5500K映射：灰度值 -> 暖白色调
-            # 白色(255) -> #F5F0E1 (245, 240, 225)
-            # 黑色(0) -> #1A1A1A (26, 26, 26)
-            lut_r = [int(B[0] + (W[0] - B[0]) * (v / 255.0)) for v in range(256)]
-            lut_g = [int(B[1] + (W[1] - B[1]) * (v / 255.0)) for v in range(256)]
-            lut_b = [int(B[2] + (W[2] - B[2]) * (v / 255.0)) for v in range(256)]
-
             r = gray.point(lut_r)
             g = gray.point(lut_g)
             b = gray.point(lut_b)
             result = Image.merge('RGB', (r, g, b))
+            print(f"[{grayscale}] gamma={gamma}, B=#{B[0]:02X}{B[1]:02X}{B[2]:02X}, W=#{W[0]:02X}{W[1]:02X}{W[2]:02X}")
         else:
             # 普通主题模式
             # 查找表
@@ -233,7 +263,8 @@ THEMES = {
     'yellow': ('#F5EFD7', '#141412'),
     'green': ('#C7EDCC', '#101310'),
     'heguang': ('#E0E0E0', '#141414'),
-    'eink': ('#F5F0E1', '#1A1A1A'),
+    'eink': ('#FDF7EF', '#000000'),
+    'night': ('#2A2A2A', '#E8E8E8'),
 }
 
 # 基础调色板
@@ -258,6 +289,7 @@ THEME_NAMES = {
     'green': '绿色',
     'heguang': '和光',
     'eink': '电纸书',
+    'night': '黑夜',
 }
 
 
@@ -1722,6 +1754,8 @@ class TacticalPane(QLabel):
             self.scale_factor = 1.0
         elif mode == "fit_width":
             self.scale_factor = max(0.2, min(pane_w / pw, 10.0))
+        elif mode == "fit_height":
+            self.scale_factor = max(0.2, min(pane_h / ph, 10.0))
         elif mode == "fit_page":
             sw = pane_w / pw
             sh = pane_h / ph
@@ -4869,8 +4903,13 @@ class TactiReader(QMainWindow):
             # 非浅色主题下，对页面像素应用主题映射
             if getattr(self, 'current_theme', 'light') != 'light':
                 W_hex, B_hex = THEMES[self.current_theme]
-                is_eink = self.current_theme == 'eink'
-                pixmap = transform_pixmap(pixmap, W_hex, B_hex, grayscale=is_eink)
+                theme = self.current_theme
+                if theme == 'night':
+                    pixmap = transform_pixmap(pixmap, W_hex, B_hex, grayscale='night')
+                elif theme == 'eink':
+                    pixmap = transform_pixmap(pixmap, W_hex, B_hex, grayscale='eink')
+                else:
+                    pixmap = transform_pixmap(pixmap, W_hex, B_hex)
 
             # 限制缓存大小，避免内存无限增长（EPUB缓存更大，页数多）
             cache_limit = 40 if is_epub else 20
