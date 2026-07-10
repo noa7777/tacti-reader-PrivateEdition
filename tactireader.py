@@ -742,6 +742,7 @@ class TocDialog(QDialog):
         self.tree_root = []
         self.all_nodes = {}  # node_id -> node mapping for depth calculation
         self.selectedId = ""  # 当前选中的节点 ID（持久化）
+        self.search_mode = False  # 是否处于搜索模式
         self.theme_name = theme_name
         self.bookmarks = bookmarks or {}  # {"Q": {"page": 1, "name": "..."}, ...}
         if colors is None:
@@ -750,7 +751,7 @@ class TocDialog(QDialog):
         else:
             self.colors = colors
 
-        self.setWindowTitle("PDF 目录导航")
+        self.setWindowTitle("目录导航")
         # 窗口大小：占屏幕的 3/5，并居中
         screen_geo = QApplication.primaryScreen().availableGeometry()
         w = int(screen_geo.width() * 0.6)
@@ -774,6 +775,28 @@ class TocDialog(QDialog):
         self.setStyleSheet(f"QDialog {{ background-color: {self.colors['bg']}; }}")
         main_layout = QVBoxLayout(self)
 
+        # 搜索栏
+        search_layout = QHBoxLayout()
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("搜索目录...")
+        self.search_input.setStyleSheet(f"""
+            QLineEdit {{
+                padding: 6px 10px;
+                font-size: 12pt;
+                border: 1px solid {self.colors['border']};
+                border-radius: 4px;
+                background-color: {self.colors['entry_bg']};
+                color: {self.colors['entry_fg']};
+            }}
+        """)
+        self.search_input.returnPressed.connect(self._perform_search)
+        search_layout.addWidget(self.search_input, 1)
+
+        search_btn = QPushButton("搜索")
+        search_btn.clicked.connect(self._perform_search)
+        search_layout.addWidget(search_btn)
+        main_layout.addLayout(search_layout)
+
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_content = QWidget()
@@ -785,6 +808,10 @@ class TocDialog(QDialog):
 
         button_box = QHBoxLayout()
         button_box.addStretch()
+        self.back_btn = QPushButton("返回")
+        self.back_btn.clicked.connect(self._back_to_navigation)
+        self.back_btn.setVisible(False)
+        button_box.addWidget(self.back_btn)
         close_btn = QPushButton("关闭")
         close_btn.clicked.connect(self.reject)
         button_box.addWidget(close_btn)
@@ -1134,6 +1161,87 @@ class TocDialog(QDialog):
             self.selectedId = selected_id
         else:
             self.selectedId = ""
+        self._render()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            if self.search_mode:
+                self._back_to_navigation()
+                event.accept()
+            else:
+                super().keyPressEvent(event)
+        else:
+            super().keyPressEvent(event)
+
+    def _perform_search(self):
+        """执行目录搜索，每个结果附带完整路径"""
+        keyword = self.search_input.text().strip()
+        if not keyword or not self.all_nodes:
+            return
+        results = []  # [(node, path_string), ...]
+        for node in self.all_nodes.values():
+            if keyword.lower() in node.title.lower():
+                ancestors = self._get_ancestor_chain(node)
+                path_parts = [n.title for n in ancestors]
+                path_str = "/".join(path_parts)
+                results.append((node, path_str))
+        if not results:
+            return
+        results.sort(key=lambda x: (x[0].depth, x[0].page))
+        self.search_mode = True
+        self._show_search_results(results)
+
+    def _show_search_results(self, results):
+        """显示搜索结果界面（紧凑列表，行间距1.3倍字高）"""
+        while self.scroll_layout.count():
+            item = self.scroll_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        # 搜索结果标题
+        title_label = QLabel(f"找到 {len(results)} 个匹配项")
+        title_label.setStyleSheet(
+            f"color: {self.colors['fg']}; font-size: 12px; padding: 4px 0;"
+        )
+        title_label.setAlignment(Qt.AlignCenter)
+        self.scroll_layout.addWidget(title_label)
+
+        for node, path_str in results:
+            btn = QPushButton(path_str)
+            btn.setFlat(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: transparent;
+                    color: {self.colors['fg']};
+                    border: none;
+                    border-radius: 2px;
+                    padding: 2px 8px;
+                    font-size: 12pt;
+                    text-align: left;
+                }}
+                QPushButton:hover {{
+                    background-color: {self.colors['highlight']}40;
+                }}
+            """)
+            btn.clicked.connect(lambda checked, n=node: self._on_search_result_click(n))
+            self.scroll_layout.addWidget(btn)
+
+        self.scroll_layout.addStretch()
+        self.back_btn.setVisible(True)
+
+    def _on_search_result_click(self, node):
+        """点击搜索结果：跳转到对应页面 + 持久化选中高亮"""
+        self.selectedId = node.node_id
+        self.nodeSelected.emit(node.page)
+        self.accept()
+
+    def _back_to_navigation(self):
+        """从搜索模式返回导航模式"""
+        self.search_mode = False
+        self.search_input.clear()
+        self.back_btn.setVisible(False)
         self._render()
 
 
@@ -4553,13 +4661,13 @@ class TactiReader(QMainWindow):
             self.search_highlights = {}
             self.current_search_term = ""
 
-            self.default_fit_mode = "fit_height"
+            self.default_fit_mode = "fit_page"
             self._apply_epub_layout(saved_params)
             self.total_pages = len(self.doc)
 
             self.load_config()
             if self.is_epub:
-                self.default_fit_mode = "fit_height"
+                self.default_fit_mode = "fit_page"
                 self._build_fit_menu()
             self.load_pdf_toc()
             self.refresh_bookmark_panel()
