@@ -1792,15 +1792,13 @@ class TacticalPane(QLabel):
                 transform, Qt.SmoothTransformation
             )
 
-        # 加载页面文本用于选取（EPUB跳过，get_text("dict")对重排文档很慢）
+        # 加载页面文本用于选取
         if (
             hasattr(self.window(), "doc") and self.window().doc and page_num > 0
-            and not getattr(self.window(), "is_epub", False)
         ):
             try:
                 self.doc_page = self.window().doc[page_num - 1]
                 self.page_text_dict = self.doc_page.get_text("dict")
-                print(f"[DEBUG] Loaded text dict for page {page_num}")
             except Exception as e:
                 print(f"[ERROR] Failed to load text for page {page_num}: {e}")
                 self.doc_page = None
@@ -2234,6 +2232,8 @@ class TacticalPane(QLabel):
             self.is_selecting_text = True
             self.selection_start = event.pos()
             self.selection_end = event.pos()
+            event.accept()
+            return
             # 不立即调用 update_selected_text，避免单击产生空选区
         elif self.annotation_mode and event.button() == Qt.LeftButton:
             # 开始绘制批注
@@ -2318,6 +2318,8 @@ class TacticalPane(QLabel):
             self.selection_end = event.pos()
             self.update_selected_text()
             self.setCursor(Qt.IBeamCursor)
+            event.accept()
+            return
         elif self.annotation_mode and self.drawing:
             if self.annotation_mode == "rect" and self.temp_annotation:
                 # 更新矩形大小
@@ -2363,9 +2365,9 @@ class TacticalPane(QLabel):
             # J模式下，松开左键结束选取，保留高亮
             self.is_selecting_text = False
             self.update_selected_text()
+            event.accept()
+            return
             # 可在此处复制到剪贴板或弹出菜单
-            if hasattr(self, "selected_text") and self.selected_text:
-                print(f"[DEBUG] Selected text: '{self.selected_text}'")
         elif self.annotation_mode and self.drawing and event.button() == Qt.LeftButton:
             self.drawing = False
             if self.annotation_mode == "rect" and self.temp_annotation:
@@ -2656,6 +2658,10 @@ class TacticalPane(QLabel):
             self.text_selection_highlights = []
             return
 
+        # 根据文档类型动态决定渲染倍率（PDF: 2.0, EPUB: 1.5）
+        is_epub = getattr(self.window(), 'is_epub', False)
+        render_scale = 1.5 if is_epub else 2.0
+
         # === 步骤1: 获取鼠标在当前 Widget 中的选区 (屏幕像素) ===
         sel_widget_x0 = min(self.selection_start.x(), self.selection_end.x())
         sel_widget_y0 = min(self.selection_start.y(), self.selection_end.y())
@@ -2679,8 +2685,8 @@ class TacticalPane(QLabel):
                     pdf_x0, pdf_y0, pdf_x1, pdf_y1 = span["bbox"]
 
                     # 1. 转为 Pixmap 像素坐标 (0°)
-                    px0, py0 = pdf_x0 * RENDER_SCALE, pdf_y0 * RENDER_SCALE
-                    px1, py1 = pdf_x1 * RENDER_SCALE, pdf_y1 * RENDER_SCALE
+                    px0, py0 = pdf_x0 * render_scale, pdf_y0 * render_scale
+                    px1, py1 = pdf_x1 * render_scale, pdf_y1 * render_scale
 
                     # 2. 应用旋转，得到当前 Pixmap 坐标
                     corners_0deg_pixmap = [
@@ -2834,10 +2840,10 @@ class TacticalPane(QLabel):
                 # 添加高亮矩形 (PDF 坐标 -> Pixmap 坐标)
                 highlight_rects.append(
                     [
-                        highlight_pdf_x0 * RENDER_SCALE,
-                        pdf_y0 * RENDER_SCALE,
-                        (highlight_pdf_x1 - highlight_pdf_x0) * RENDER_SCALE,
-                        (pdf_y1 - pdf_y0) * RENDER_SCALE,
+                        highlight_pdf_x0 * render_scale,
+                        pdf_y0 * render_scale,
+                        (highlight_pdf_x1 - highlight_pdf_x0) * render_scale,
+                        (pdf_y1 - pdf_y0) * render_scale,
                     ]
                 )
 
