@@ -138,14 +138,15 @@ def _map_channel(v_in, b, w):
     return max(0, min(255, round(b + (w - b) * (v_in / 255.0))))
 
 
-def transform_pixmap(pixmap, W_hex, B_hex, white_threshold=200, grayscale=False):
+def transform_pixmap(pixmap, W_hex, B_hex, white_threshold=200, grayscale=False, invert=False):
     """
     对 QPixmap 中接近白色的像素逐通道应用主题映射。
     使用 Pillow 的 C 级查表/合成操作，避免 Python 逐像素循环。
 
     grayscale=False  : 普通主题映射（维持原色，仅替换白/黑端点）
-    grayscale='eink' : 电纸书模式 → BT.601灰度 + gamma=1.15 + 暖白映射
+    grayscale='eink' : 电纸书模式 → BT.601灰度 + gamma=1.15 + 中性白映射
     grayscale='night': 黑夜模式   → BT.601灰度 + gamma=0.55 + 颜色反转
+    invert=True      : 反色模式 → 颜色完全反转 + 亮度85% + 6500K色温
     """
 
     # --- 纯 numpy 版（用于测试，不依赖 PyQt/PIL）---
@@ -161,7 +162,7 @@ def transform_pixmap(pixmap, W_hex, B_hex, white_threshold=200, grayscale=False)
     # out = np.empty_like(img)
     # # 统一公式: out = text_color * (1-t) + bg_color * t
     # #         = B_ch + (W_ch - B_ch) * t
-    # # 对 eink: B=(0,0,0), W=(253,247,239) → out = W * t
+    # # 对 eink: B=(0,0,0), W=(255,255,255) → out = W * t
     # # 对 night: B=(232,232,232), W=(42,42,42) → out = 232 - 190*t
     # R = B[0] + (W[0] - B[0]) * t
     # G = B[1] + (W[1] - B[1]) * t
@@ -192,15 +193,15 @@ def transform_pixmap(pixmap, W_hex, B_hex, white_threshold=200, grayscale=False)
             # === 统一灰度映射框架：支持 eink(电纸书)和night(黑夜)两种模式 ===
             #   共同点：BT.601灰度化 → 伽马校正 → 端点色温映射
             #   区别：
-            #     * eink:  B=(0,0,0)纯黑, W=(253,247,239)暖白, gamma=1.15
-            #       纯黑不变，纯白变暖；文字深灰，背景暖白
+            #     * eink:  B=(0,0,0)纯黑, W=(255,255,255)中性白, gamma=1.15
+            #       纯黑不变，纯白不变；文字深灰，背景纯白
             #     * night: B=(232,232,232)浅字, W=(42,42,42)深底, gamma=0.55
             #       颜色反转 + 6500K冷白；文字亮灰，背景深灰
             #
             #   统一公式：LUT[v] = B_ch + (W_ch - B_ch) × (v/255)^gamma
             #
             #   v=0(原黑色)时：LUT=B → eink:纯黑, night:浅色文字
-            #   v=255(原白色)时：LUT=W → eink:暖白, night:深色背景
+            #   v=255(原白色)时：LUT=W → eink:纯白, night:深色背景
             #   中间灰度按伽马曲线在B和W之间插值
 
             gamma = 1.15 if grayscale == 'eink' else 0.55
@@ -216,6 +217,20 @@ def transform_pixmap(pixmap, W_hex, B_hex, white_threshold=200, grayscale=False)
             b = gray.point(lut_b)
             result = Image.merge('RGB', (r, g, b))
             print(f"[{grayscale}] gamma={gamma}, B=#{B[0]:02X}{B[1]:02X}{B[2]:02X}, W=#{W[0]:02X}{W[1]:02X}{W[2]:02X}")
+        elif invert:
+            # 反色模式：颜色完全反转 + 亮度降至85% + 6500K中性白
+            # 深灰背景 #2A2A2A，白字 #FFFFFF，避免纯黑背景过刺眼
+            r, g, b = pil_img.split()
+
+            # 反转：255 - v，然后乘以0.85降低亮度
+            def invert_lut(v):
+                return max(0, min(255, round((255 - v) * 0.85)))
+
+            r_inv = r.point(invert_lut)
+            g_inv = g.point(invert_lut)
+            b_inv = b.point(invert_lut)
+
+            result = Image.merge('RGB', (r_inv, g_inv, b_inv))
         else:
             # 普通主题模式
             # 查找表
@@ -263,8 +278,9 @@ THEMES = {
     'yellow': ('#F5EFD7', '#141412'),
     'green': ('#C7EDCC', '#101310'),
     'heguang': ('#E0E0E0', '#141414'),
-    'eink': ('#FDF7EF', '#000000'),
+    'eink': ('#F5F0E1', '#1A1A1A'),
     'night': ('#2A2A2A', '#E8E8E8'),
+    'invert': ('#FFFFFF', '#2A2A2A'),
 }
 
 # 基础调色板
@@ -290,6 +306,7 @@ THEME_NAMES = {
     'heguang': '和光',
     'eink': '电纸书',
     'night': '黑夜',
+    'invert': '反色',
 }
 
 
@@ -1875,6 +1892,16 @@ class TacticalPane(QLabel):
             self.page_pixmap = self.original_pixmap.transformed(
                 transform, Qt.SmoothTransformation
             )
+            # 旋转后自动缩放至适合页面（fit_page），左上角锚点
+            pw = self.page_pixmap.width()
+            ph = self.page_pixmap.height()
+            pane_w = self.width()
+            pane_h = self.height()
+            if pane_w > 0 and pane_h > 0 and pw > 0 and ph > 0:
+                sx = pane_w / pw
+                sy = pane_h / ph
+                self.scale_factor = max(0.2, min(sx, sy, 10.0))
+            self.offset = QPointF(0, 0)
         self.update()
 
     def resizeEvent(self, event):
@@ -2455,14 +2482,21 @@ class TacticalPane(QLabel):
 
         menu = QMenu(self)
 
-        # 0. 打开电子书
+        # 0. 目录导航（放在第一个位置）
+        toc_action = QAction(main_window.tr("目录导航"), self)
+        toc_action.triggered.connect(main_window.open_toc_dialog)
+        menu.addAction(toc_action)
+
+        menu.addSeparator()
+
+        # 1. 打开电子书
         open_action = QAction(main_window.tr("打开电子书..."), self)
         open_action.triggered.connect(main_window.open_pdf_dialog)
         menu.addAction(open_action)
 
         menu.addSeparator()
 
-        # 1. 颜色模式子菜单
+        # 3. 颜色模式子菜单
         theme_menu = menu.addMenu(main_window.tr("颜色模式"))
         current_theme = getattr(main_window, 'current_theme', 'light')
         for name in THEMES:
@@ -2473,14 +2507,14 @@ class TacticalPane(QLabel):
             act.triggered.connect(lambda checked, n=name: main_window.apply_theme(n))
             theme_menu.addAction(act)
 
-        # 2. 设置文字大小（批注文字）
+        # 4. 设置文字大小（批注文字）
         font_size_action = QAction(main_window.tr("设置文字大小"), self)
         font_size_action.triggered.connect(main_window.set_text_annotation_font_size)
         menu.addAction(font_size_action)
 
         menu.addSeparator()
 
-        # 3. 换书子菜单
+        # 5. 换书子菜单
         if main_window.open_documents:
             switch_menu = menu.addMenu(main_window.tr("换书"))
             current_path = os.path.abspath(main_window.pdf_path) if main_window.pdf_path else ""
@@ -2492,7 +2526,7 @@ class TacticalPane(QLabel):
                 act.triggered.connect(lambda checked, i=idx: main_window._switch_to_document(i))
                 switch_menu.addAction(act)
 
-        # 4. 删书子菜单
+        # 6. 删书子菜单
         if main_window.open_documents:
             del_menu = menu.addMenu(main_window.tr("删书"))
             for idx, path in enumerate(main_window.open_documents):
@@ -2517,7 +2551,7 @@ class TacticalPane(QLabel):
 
         menu.addSeparator()
 
-        # 5. 默认大小子菜单（与菜单栏一致）
+        # 7. 默认大小子菜单（与菜单栏一致）
         fit_menu = menu.addMenu(main_window.tr("默认大小"))
         labels = {
             "actual_size": "实际大小",
@@ -2531,6 +2565,39 @@ class TacticalPane(QLabel):
             act.setChecked(mode == current_fit)
             act.triggered.connect(lambda _, m=mode: main_window._set_fit_mode(m))
             fit_menu.addAction(act)
+
+        menu.addSeparator()
+
+        # 8. 清除此页所有笔记（二次确认）
+        clear_annot_action = QAction(main_window.tr("清除此页所有笔记"), self)
+        page_num_for_clear = self.page_num
+
+        def _confirm_clear_annotations():
+            reply = QMessageBox.warning(
+                main_window,
+                main_window.tr("确认清除"),
+                main_window.tr("确定要清除第 {page} 页的所有笔记吗？此操作不可撤销。").format(page=page_num_for_clear),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                if str(page_num_for_clear) in main_window.annotations:
+                    del main_window.annotations[str(page_num_for_clear)]
+                    self.annotations = []
+                    self.update()
+                    main_window.save_config()
+                    main_window.statusBar().showMessage(
+                        main_window.tr("🗑️ 已清除第 {page} 页的所有笔记").format(page=page_num_for_clear),
+                        2000,
+                    )
+                else:
+                    main_window.statusBar().showMessage(
+                        main_window.tr("第 {page} 页没有笔记").format(page=page_num_for_clear),
+                        1500,
+                    )
+
+        clear_annot_action.triggered.connect(_confirm_clear_annotations)
+        menu.addAction(clear_annot_action)
 
         menu.exec_(event.globalPos())
 
@@ -2916,7 +2983,7 @@ class TactiReader(QMainWindow):
                 # === 视图菜单 ===
                 "View": "视图",
                 "Toggle Single/Double Page Mode (Z)": "切换单/双页模式 (Z)",
-                "Toggle Left Pane Lock/Follow (C)": "切换左窗格锁定/跟随 (C)",
+                "Toggle Left Pane Lock/Follow (C)": "切换左右页联动/解除 (C)",
                 "Show/Hide Bookmarks & TOC Panel (N)": "显示/隐藏书签与目录面板 (N)",
                 "Toggle Fullscreen (F11)": "全屏/退出全屏 (F11)",
                 "Rotate Current Page Clockwise (~)": "顺时针旋转当前页 (~)",
@@ -3065,8 +3132,10 @@ class TactiReader(QMainWindow):
                 "Double": "双页",
                 "None": "无",
                 "↔️ Mode: {mode}-page": "↔️ 模式：{mode}页",
-                "⬅️ Left pane: Locked": "⬅️ 左面板：已锁定",
-                "⬅️ Left pane: Following": "⬅️ 左面板：跟随",
+                "⬅️ Left pane: Locked": "🔓 已解除联动",
+                "⬅️ Left pane: Following": "🔗 左右联动",
+                "Unlinked": "已解除联动",
+                "Linked": "左右联动",
                 "🔁 Flip ×{x}": "🔁 翻页倍数 ×{x}",
                 "🔄 Home reset to P.{page}": "🔄 主页重置为第 {page} 页",
                 "🔄 Current pages reset (zoom+pan+rotation) & splitter centered": "🔄 当前页面重置（缩放+平移+旋转）且分隔条居中",
@@ -3200,7 +3269,8 @@ class TactiReader(QMainWindow):
         self.bookmark_layout.addWidget(self._toc_panel_btn)
 
         main_layout.addWidget(self.bookmark_panel)
-        self.bookmark_panel_visible = True
+        self.bookmark_panel_visible = False
+        self.bookmark_panel.setVisible(False)
         # 创建左右窗格
         self.left_pane = TacticalPane(self)
         self.left_pane.is_left_pane = True  # ← 关键：标记为左窗格
@@ -4713,7 +4783,7 @@ class TactiReader(QMainWindow):
             self.locked_left_page = max(
                 1, min(config.get("locked_left_page", 1), self.total_pages)
             )
-            self.bookmark_panel_visible = config.get("bookmark_panel_visible", True)
+            self.bookmark_panel_visible = config.get("bookmark_panel_visible", False)
             self.bookmark_panel.setVisible(self.bookmark_panel_visible)
             self.default_fit_mode = config.get("default_fit_mode", "fit_page")
             self._build_fit_menu()
@@ -5022,6 +5092,8 @@ class TactiReader(QMainWindow):
                     pixmap = transform_pixmap(pixmap, W_hex, B_hex, grayscale='night')
                 elif theme == 'eink':
                     pixmap = transform_pixmap(pixmap, W_hex, B_hex, grayscale='eink')
+                elif theme == 'invert':
+                    pixmap = transform_pixmap(pixmap, W_hex, B_hex, invert=True)
                 else:
                     pixmap = transform_pixmap(pixmap, W_hex, B_hex)
 
@@ -5064,11 +5136,9 @@ class TactiReader(QMainWindow):
         )
 
         if not self.single_page_mode:
-            # 计算左页码
-            if self.left_locked and self.locked_left_page >= 1:
-                left_page_num = self.locked_left_page
-            else:
-                left_page_num = max(1, right_1idx - 1)
+            # 左页码：联动模式下由 _jump_to_page_internal 更新 locked_left_page
+            # 解除联动模式下 locked_left_page 保持不变
+            left_page_num = max(1, min(self.locked_left_page, self.total_pages))
             self.locked_left_page = left_page_num
 
             # 渲染左页
@@ -5135,7 +5205,7 @@ class TactiReader(QMainWindow):
 
     def update_status(self):
         mode_str = self.tr("Single") if self.single_page_mode else self.tr("Double")
-        lock_icon = "🔒" if self.left_locked else ""
+        lock_icon = "🔓" if self.left_locked else "🔗"
 
         # 批注模式状态
         annotation_mode = self.tr("None")
@@ -5329,6 +5399,13 @@ class TactiReader(QMainWindow):
 
         self.statusBar().showMessage(f"⏪ Back to P.{page_num}", 1000)
 
+    def _reset_pane_view(self, pane):
+        """重置窗格视图：左上角锚点 + 恢复默认缩放（保留旋转）。"""
+        if not pane or not pane.original_pixmap:
+            return
+        pane.offset = QPointF(0, 0)
+        pane.apply_fit_mode(self.default_fit_mode)
+
     def _jump_to_page_internal(self, page_1idx, is_left=False):
         if not self.doc:
             return
@@ -5366,11 +5443,15 @@ class TactiReader(QMainWindow):
             furthest = max(page_1idx, self.right_page)
             if furthest > self.home_page:
                 self.home_page = furthest
-            self.left_locked = True
             self.locked_left_page = page_1idx
+            # 联动模式：右页跟随左页
+            if not self.left_locked:
+                self.right_page = max(1, min(page_1idx + 1, self.total_pages))
             self.render_facing()
-            self.left_pane.apply_fit_mode(self.default_fit_mode)
-            self.left_pane.offset = QPointF(0, 0)
+            # 先设置左上角锚点，再应用默认缩放，确保渲染刷新时位置正确
+            self._reset_pane_view(self.left_pane)
+            if not self.left_locked:
+                self._reset_pane_view(self.right_pane)
             self.left_pane.setFocus()
             self.save_config()
         else:
@@ -5378,13 +5459,14 @@ class TactiReader(QMainWindow):
             if page_1idx > self.home_page:
                 self.home_page = page_1idx
             self.right_page = page_1idx
-            self.render_facing()
-            self.right_pane.apply_fit_mode(self.default_fit_mode)
-            self.right_pane.offset = QPointF(0, 0)
-            # 跟随的左窗格也应用默认大小，位置归位
+            # 联动模式：左页跟随右页
             if not self.single_page_mode and not self.left_locked:
-                self.left_pane.apply_fit_mode(self.default_fit_mode)
-                self.left_pane.offset = QPointF(0, 0)
+                self.locked_left_page = max(1, page_1idx - 1)
+            self.render_facing()
+            self._reset_pane_view(self.right_pane)
+            # 联动模式下，跟随的左窗格也重置视图
+            if not self.single_page_mode and not self.left_locked:
+                self._reset_pane_view(self.left_pane)
             self.right_pane.setFocus()
             self.update_status()
 
@@ -5790,12 +5872,12 @@ class TactiReader(QMainWindow):
 
             # Reset right pane
             self.right_pane.reset_view()
-            self.page_rotations[self.right_pane.page_num] = 0
+            self.page_rotations[str(self.right_pane.page_num)] = 0
 
             # Reset left pane if in double page mode
             if not self.single_page_mode:
                 self.left_pane.reset_view()
-                self.page_rotations[self.left_pane.page_num] = 0
+                self.page_rotations[str(self.left_pane.page_num)] = 0
 
             self.save_config()
             self.statusBar().showMessage(
@@ -5826,14 +5908,14 @@ class TactiReader(QMainWindow):
         if key == Qt.Key_X and modifiers == Qt.NoModifier:
             if focused_on_left:
                 self.left_pane.reset_view()
-                self.page_rotations[self.left_pane.page_num] = 0
+                self.page_rotations[str(self.left_pane.page_num)] = 0
                 self.save_config()
                 self.statusBar().showMessage(
                     self.tr("⬅️ Left reset (zoom+rotation)"), 1000
                 )
             else:
                 self.right_pane.reset_view()
-                self.page_rotations[self.right_pane.page_num] = 0
+                self.page_rotations[str(self.right_pane.page_num)] = 0
                 self.save_config()
                 self.statusBar().showMessage(
                     self.tr("➡️ Right reset (zoom+rotation)"), 1000
@@ -5912,14 +5994,22 @@ class TactiReader(QMainWindow):
             )
             return
 
-        # C: Toggle left pane lock/follow (only in double mode)
+        # C: Toggle left pane link/unlink (only in double mode)
         if key == Qt.Key_C and modifiers == Qt.NoModifier and not self.single_page_mode:
             self.left_locked = not self.left_locked
             if not self.left_locked:
-                self.locked_left_page = max(1, self.right_page - 1)
+                # 恢复联动：焦点页不变，另一页联动过来
+                if self.last_focused_pane_is_left:
+                    # 焦点在左页：右页 = 左页 + 1
+                    self.locked_left_page = max(1, self.left_pane.page_num)
+                    self.right_page = max(1, min(self.left_pane.page_num + 1, self.total_pages))
+                else:
+                    # 焦点在右页：左页 = 右页 - 1
+                    self.right_page = max(1, self.right_pane.page_num)
+                    self.locked_left_page = max(1, self.right_page - 1)
             self.render_facing()
-            status = self.tr("Locked") if self.left_locked else self.tr("Following")
-            self.statusBar().showMessage(f"⬅️ Left pane: {status}", 1500)
+            status = self.tr("Unlinked") if self.left_locked else self.tr("Linked")
+            self.statusBar().showMessage(f"🔗 {status}", 1500)
             self.save_config()
             return
 
@@ -6183,9 +6273,9 @@ class TactiReader(QMainWindow):
             self.statusBar().setVisible(True)
         else:
             self.showFullScreen()
-            # 进入全屏时：EPUB 显示状态栏，PDF 隐藏状态栏；菜单栏始终隐藏
+            # 进入全屏时隐藏菜单栏和状态栏
             self.menuBar().setVisible(False)
-            self.statusBar().setVisible(self.is_epub)
+            self.statusBar().setVisible(False)
 
     def toggle_text_selection_mode(self):
         """全局切换文字选取模式（同步左右窗格）"""
